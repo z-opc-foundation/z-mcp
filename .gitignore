@@ -22,3 +22,23 @@
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+# flatten-maven-plugin 产物 (process-resources 阶段生成, 用于发布时的 POM 注入)
+.flattened-pom.xml
+**/.flattened-pom.xml
+
+# Maven 多模块 target
+target/
+**/target/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db

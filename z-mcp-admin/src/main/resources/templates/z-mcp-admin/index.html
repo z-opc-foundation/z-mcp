@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>z-mcp 控制台</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 24px; color: #1f2328; }
+  h1 { font-size: 18px; margin-bottom: 16px; }
+  .card { border: 1px solid #d0d7de; border-radius: 6px; padding: 16px; margin-bottom: 16px; }
+  .kv { display: flex; gap: 16px; flex-wrap: wrap; }
+  .kv span { background: #f6f8fa; padding: 4px 10px; border-radius: 4px; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { padding: 6px 10px; border-bottom: 1px solid #eaeef2; text-align: left; }
+  th { background: #f6f8fa; }
+</style>
+</head>
+<body>
+<h1>z-mcp 控制台</h1>
+
+<div class="card">
+  <div class="kv">
+    <span>平台: z-mcp 0.1.0</span>
+    <span>状态: UP</span>
+    <span>内置工具数: <span id="builtin-tools">—</span></span>
+    <span>外部工具数: <span id="external-tools">—</span></span>
+    <span>Server 数: <span id="servers">—</span></span>
+  </div>
+</div>
+
+<div class="card">
+  <h2 style="font-size:14px;margin-top:0">工具列表</h2>
+  <table id="tools-table"><thead><tr><th>name</th><th>description</th><th>server</th></tr></thead><tbody></tbody></table>
+</div>
+
+<div class="card">
+  <h2 style="font-size:14px;margin-top:0">Server 列表</h2>
+  <table id="servers-table"><thead><tr><th>name</th><th>endpoint</th><th>transport</th></tr></thead><tbody></tbody></table>
+</div>
+
+<script>
+fetch('/mcp/admin/overview').then(r => r.json()).then(d => {
+  document.getElementById('builtin-tools').textContent = d.builtinToolCount;
+  document.getElementById('external-tools').textContent = d.externalToolCount;
+  document.getElementById('servers').textContent = d.serverCount;
+});
+fetch('/mcp/admin/tools').then(r => r.json()).then(list => {
+  const tbody = document.querySelector('#tools-table tbody');
+  list.forEach(t => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><code>${t.name}</code></td><td>${t.description || ''}</td><td>${t.server}</td>`;
+    tbody.appendChild(tr);
+  });
+});
+fetch('/mcp/admin/servers').then(r => r.json()).then(list => {
+  const tbody = document.querySelector('#servers-table tbody');
+  list.forEach(s => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><code>${s.name}</code></td><td>${s.endpoint || ''}</td><td>${s.transport}</td>`;
+    tbody.appendChild(tr);
+  });
+});
+</script>
+</body>
+</html>
