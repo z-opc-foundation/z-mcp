@@ -57,13 +57,13 @@
     </modules>
 
     <properties>
-        <revision>0.1.0</revision>
+        <revision>0.1.1</revision>
         <maven.compiler.source>8</maven.compiler.source>
         <maven.compiler.target>8</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
         <spring-boot.version>2.7.18</spring-boot.version>
-        <z-agent-kernel.version>${revision}</z-agent-kernel.version>
+        <z-agent-kernel.version>0.1.0</z-agent-kernel.version>
     </properties>
 
     <dependencyManagement>
