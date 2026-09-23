@@ -181,7 +181,10 @@
                                     <goal>jar</goal>
                                 </goals>
                                 <configuration>
-                                    <skip>true</skip>
+                                    <doclint>none</doclint>
+                                    <failOnError>false</failOnError>
+                                    <failOnWarnings>false</failOnWarnings>
+                                    <quiet>true</quiet>
                                 </configuration>
                             </execution>
                         </executions>
@@ -203,7 +206,7 @@
                     <plugin>
                         <groupId>org.sonatype.central</groupId>
                         <artifactId>central-publishing-maven-plugin</artifactId>
-                        <version>0.7.0</version>
+                        <version>0.8.0</version>
                         <extensions>true</extensions>
                         <configuration>
                             <publishingServerId>central</publishingServerId>
