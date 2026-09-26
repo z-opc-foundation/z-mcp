@@ -1,8 +1,16 @@
 package com.zifang.z.mcp.starter.autoconfig;
 
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import com.zifang.z.mcp.core.controller.JsonRpcController;
 import com.zifang.z.mcp.core.registry.McpRegistry;
+import com.zifang.z.mcp.core.session.McpSessionStore;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -65,6 +73,40 @@ public class ZMcpSseKeepAliveTest {
 
     /** 一条安静流上等到一帧心跳的上限: 周期 1 秒, 留出调度抖动和连接建立的余量. */
     private static final long HEARTBEAT_WAIT_MS = 12_000L;
+
+    /**
+     * 服务端在这几条流上做过的决定.
+     *
+     * <p>为什么要在判红时把它打出来: CI 上出现过一次 {@code java.io.IOException: Premature EOF}
+     * (jdk17 runner, 2.006 s, 红在续传那条流的第一次 readLine), 本机 8 遍 0 复现, 而那条红消息里
+     * 只有客户端的症状 —— 服务端是"摘掉了一条流"还是"这条会话压根没找到", 当时没有任何线索。
+     * 现在只要服务端说过话, 它就跟着红消息一起出来。
+     */
+    private static final ListAppender<ILoggingEvent> SERVER_SIDE = new ListAppender<ILoggingEvent>();
+
+    @Before public void watchServerSideDecisions() {
+        LoggerContext ctx = (LoggerContext) LoggerFactory.getILoggerFactory();
+        SERVER_SIDE.start();
+        ctx.getLogger(McpSessionStore.class.getName()).addAppender(SERVER_SIDE);
+        ctx.getLogger(JsonRpcController.class.getName()).addAppender(SERVER_SIDE);
+    }
+
+    /** 摘干净: 下一个用例若也挂一遍, 不该读到本用例留下的行; 别处的用例也不该被这个 appender 拖累. */
+    @After public void stopWatchingServerSideDecisions() {
+        LoggerContext ctx = (LoggerContext) LoggerFactory.getILoggerFactory();
+        ctx.getLogger(McpSessionStore.class.getName()).detachAppender(SERVER_SIDE);
+        ctx.getLogger(JsonRpcController.class.getName()).detachAppender(SERVER_SIDE);
+        SERVER_SIDE.stop();
+        SERVER_SIDE.list.clear();
+    }
+
+    private static String serverSide() {
+        StringBuilder out = new StringBuilder(" [服务端同期日志: ");
+        for (ILoggingEvent e : SERVER_SIDE.list) {
+            out.append(e.getLevel()).append(' ').append(e.getFormattedMessage()).append(" | ");
+        }
+        return out.append(']').toString();
+    }
 
     @LocalServerPort
     private int port;
@@ -245,6 +287,9 @@ public class ZMcpSseKeepAliveTest {
     /**
      * 读到下一个空行为止的一整帧. 等待上限就是 socket 的 read timeout(见 {@code open()}),
      * 心跳周期配成 1 秒, 所以撞满它意味着这条流真的不会再自己掉帧了。
+     *
+     * <p>三条出口一律附上 {@link #serverSide()}: "超时没帧"、"流提前结束"与"读的时候抛 IOException"
+     * 在服务端分别是"没人敲 tick"、"被摘掉/被 complete"与"响应被收尾", 而客户端症状都是同一行红。
      */
     private static String frame(BufferedReader in) throws IOException {
         StringBuilder frame = new StringBuilder();
@@ -259,9 +304,13 @@ public class ZMcpSseKeepAliveTest {
                 frame.append(line);
             }
         } catch (SocketTimeoutException e) {
-            fail(HEARTBEAT_WAIT_MS / 1000L + " 秒内流上没有帧(已读到: " + frame + ")");
+            fail(HEARTBEAT_WAIT_MS / 1000L + " 秒内流上没有帧(已读到: " + frame + ")" + serverSide());
+        } catch (IOException e) {
+            // "Premature EOF" 走的正是这一支: HttpURLConnection 看到服务端把 chunked 响应收尾了.
+            // 不在这里吞掉它 —— 只是把服务端当时说过的话一起交出去.
+            fail(e + " —— 读到: " + frame + serverSide());
         }
-        fail("流在帧完整之前就结束了(已读到: " + frame + ")");
+        fail("流在帧完整之前就结束了(已读到: " + frame + ")" + serverSide());
         return frame.toString();
     }
 
