@@ -10,9 +10,11 @@ import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -606,5 +608,70 @@ public class ExternalServerManagerTest {
         assertTrue(f.registry.hasTool("their_tool"));
         assertNull("不带链的条目存下来就是没有链", f.registry.lookup("their_tool").origins);
         assertEquals(1, f.registry.toolCount());
+    }
+
+    /** {@link ExternalServerManager} 起的那条周期线程叫这个. */
+    private static final String HEALTH_THREAD = "z-mcp-server-health";
+
+    /**
+     * 当下活着的健康检查线程.
+     *
+     * <p>{@link Thread} 没有覆写 {@code equals}/{@code hashCode}, 所以放进 Set 就是按**对象身份**比 ——
+     * 正是这里要的判据: 同 JVM 里别的上下文(或将来别的用例)留着的线程不该算到这台 manager 头上,
+     * 而"这台 manager 又新起了一条"只能靠身份看出来, 数名字会误报.
+     */
+    private static Set<Thread> healthThreads() {
+        Set<Thread> out = new HashSet<Thread>();
+        for (Thread t : Thread.getAllStackTraces().keySet()) {
+            if (HEALTH_THREAD.equals(t.getName()) && t.isAlive()) out.add(t);
+        }
+        return out;
+    }
+
+    private static List<String> namesOf(Set<Thread> in) {
+        List<String> out = new ArrayList<String>();
+        for (Thread t : in) out.add(t.getName() + "#" + System.identityHashCode(t));
+        return out;
+    }
+
+    /**
+     * {@code destroy()} 是终点: 它之后一次**迟到**的同步也不许再把健康检查线程起回来.
+     *
+     * <p>CI 上那条红落点在 z-mcp-starter
+     * ({@code AssertionError: context 已关, 健康检查线程还在跑 = destroyMethod 没生效}), 但根因不在
+     * starter 的装配 —— 装配确实声明了 {@code @Bean(destroyMethod = "destroy")}. 根因是
+     * {@code destroy()} 只把 {@code scheduler} 置成 null, 于是把门重新打开: 首轮同步跑在守护线程里
+     * ({@code ZMcpAutoConfiguration} 起的 bootstrap 调 {@code manager.syncAll()}), 它只要比
+     * {@code ctx.close()} 晚抢到 manager 这把锁, 就在一个**已经销毁的 bean** 上又开了一条周期线程,
+     * 而这一条再没有任何人负责关(同 JVM 里每关启一次漏一条)。
+     *
+     * <p>间隔故意设成 300 秒, 所以周期任务在本用例里**永远不会自己触发**; 那次迟到的同步由测试
+     * 亲自调 {@code syncAll()} 复现 —— 同一个方法、同一把锁, 只是换了调用者. 于是红绿完全由调用
+     * 次序决定, 不赌时序(本机跑不出 CI 那种交错, 正是它一直绿的原因).
+     */
+    @Test
+    public void destroy_is_terminal_even_when_a_late_sync_arrives_afterwards() throws Exception {
+        Fixture f = new Fixture();
+        f.properties.setHealthCheckIntervalSeconds(300);
+        f.server("acme");
+        publish(f, "acme", "[{\"name\":\"echo\"}]");
+
+        f.manager.syncAll();
+        Set<Thread> first = healthThreads();
+        assertEquals("配了正间隔就该有一条健康检查线程", 1, first.size());
+
+        f.manager.destroy();
+        for (Thread t : first) {
+            t.join(3_000L);
+            // 上限而不是无超时 await: 无界的等只会把"摘掉守卫"的变异从判红变成挂死, 把量具一起拖走.
+            assertFalse("destroy 之后那条健康检查线程还活着", t.isAlive());
+        }
+
+        // 迟到的首轮同步: bootstrap 线程在 ctx.close() 之后才拿到 manager 这把锁.
+        f.manager.syncAll();
+        Set<Thread> resurrected = healthThreads();
+        resurrected.removeAll(first);
+        assertTrue("destroy 是终点, 但一次迟到的 syncAll 又把周期线程起回来了: "
+                + namesOf(resurrected), resurrected.isEmpty());
     }
 }

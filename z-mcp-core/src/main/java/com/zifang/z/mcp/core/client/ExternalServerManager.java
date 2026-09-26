@@ -294,7 +294,7 @@ public class ExternalServerManager {
 
     private void startSchedulerIfNeeded() {
         int interval = properties.getHealthCheckIntervalSeconds();
-        if (interval <= 0 || scheduler != null) return;
+        if (destroyed || interval <= 0 || scheduler != null) return;
         scheduler = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
             @Override public Thread newThread(Runnable r) {
                 Thread t = new Thread(r, "z-mcp-server-health");
@@ -314,6 +314,7 @@ public class ExternalServerManager {
     }
 
     public synchronized void destroy() {
+        destroyed = true;
         if (scheduler != null) {
             scheduler.shutdownNow();
             scheduler = null;
