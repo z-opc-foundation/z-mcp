@@ -238,6 +238,43 @@ public class ZMcpSseStreamTest {
         }
     }
 
+    /**
+     * 服务端自己把这条流收掉时, 那句"是我关的"要跟着判红一起出来.
+     *
+     * <p>这条用例钉的不是流的行为, 是**红消息的可读性**: CI 上的 {@code Premature EOF} 就红在本类的
+     * {@code frame()} 上(jdk17 runner, 续传那次读的第一行), 而红消息里当时只有客户端的症状。
+     * 本机 0 复现 ⇒ 归因只能等下一次它在 CI 上发生时, 从红消息里读; 所以这条线索本身得有守卫 ——
+     * 否则把它写进 {@code frame()} 和把它删掉都没人会红。{@code ZMcpSseKeepAliveTest} 里那半边
+     * 守的是它自己的 {@code frame()}, 够不到这里.
+     */
+    @Test
+    public void a_stream_the_server_closed_names_the_server_in_its_own_red() throws Exception {
+        String id = handshake();
+        HttpURLConnection stream = open(EVENT_STREAM, id, null);
+        BufferedReader in = reader(stream);
+        try {
+            eventId(frame(in));
+            terminate(id);
+            // "terminate 之前已经写进 socket 的那一帧"是允许的, 所以最多读三帧, 不赌 terminate 与
+            // 心跳/推送的先后; 三帧之内这条流该结束, 结束就是 frame() 判红.
+            for (int i = 0; i < 3; i++) {
+                try {
+                    frame(in);
+                } catch (AssertionError red) {
+                    String message = String.valueOf(red.getMessage());
+                    String close = ServerSideLogCapture.lineContaining(id, "clos", "stream");
+                    assertNotNull("服务端要留下一行'是我把这条会话的流关掉了'(要同时说到会话、关闭、流): "
+                            + serverSide(), close);
+                    assertTrue("判红消息得把服务端同期的话原样带出来: " + message, message.contains(close));
+                    return;
+                }
+            }
+            fail("会话已经终止, 这条流却还在给出帧");
+        } finally {
+            stream.disconnect();
+        }
+    }
+
     /** 补不上就得明着拒(400), 而不是给一条看着正常、少了几条事件的流. */
     @Test
     public void a_position_the_buffer_has_already_dropped_is_refused_on_the_wire() throws Exception {
