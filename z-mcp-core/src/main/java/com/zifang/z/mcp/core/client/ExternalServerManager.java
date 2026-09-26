@@ -199,31 +199,27 @@ public class ExternalServerManager {
         }
         String signature = signatureOf(accepted);
         if (signature.equals(m.publishedSignature) && stillRegistered(m)) {
-            //  重抄一遍同样的目录会 fire 两次变更(摘一次、登一次), 而每条会话都会因此收到
-            //  notifications/tools/list_changed 并去重取 tools/list —— 250 上实测每轮 8 帧.
+            //  重抄一遍同样的目录也要动一次快照、播一帧变更, 而每条会话都会因此去重取
+            //  tools/list —— 250 上实测每轮 8 帧(那时"变了"的动作还是摘一次+登一次, 一帧变两帧).
             return false;
         }
         m.publishedSignature = signature;
-        dropTools(m);
         final McpRemoteClient client = m.client;
-        for (final McpToolDto tool : accepted) {
-            String remoteName = tool.getName();
-            String effective = registry.tool(remoteName)
-                    .title(tool.getTitle())
-                    .description(tool.getDescription())
-                    .server(config.getName())
-                    .inputSchema(tool.getInputSchemaJson())
-                    .outputSchema(tool.getOutputSchemaJson())
-                    .annotations(tool.getAnnotations())
-                    .origins(tool.getOrigins())
-                    .register(new McpRegistry.ToolExecutor() {
-                        @Override
-                        public Object execute(Map<String, Object> arguments) throws Exception {
-                            return callUpstream(client, tool.getName(), arguments);
-                        }
-                    });
-            m.toolNames.add(effective);
-        }
+        // 整批一次换到位 —— 而不是"逐条摘掉再逐条登回": 后者每一趟摘与每一趟登各自播一帧
+        // list_changed, 而每一帧都在叫所有会话重取目录, 那些时刻读目录就是缺的。
+        List<String> published = registry.replaceServerTools(config.getName(), accepted,
+                new McpRegistry.ToolExecutorFactory() {
+                    @Override public McpRegistry.ToolExecutor create(final McpToolDto tool) {
+                        final String remoteName = tool.getName();
+                        return new McpRegistry.ToolExecutor() {
+                            @Override public Object execute(Map<String, Object> arguments) throws Exception {
+                                return callUpstream(client, remoteName, arguments);
+                            }
+                        };
+                    }
+                });
+        m.toolNames.clear();
+        m.toolNames.addAll(published);
         if (echoed > 0) {
             log.warn("mcp server {} returned {} tool(s) that this server ({}) itself advertised;"
                     + " 聚合已成环, 这些条目不再收 (z-mcp/origins)",
@@ -273,10 +269,23 @@ public class ExternalServerManager {
         }
     }
 
+    /**
+     * 把这台上游留在目录里的那一批一次摘掉 —— 空的那批 {@link McpRegistry#replaceServerTools}
+     * 自己会认下来(不换快照、也不播变更), 所以这里不必先判空.
+     */
     private void dropTools(Managed m) {
-        for (String n : m.toolNames) registry.unregister(n);
+        registry.replaceServerTools(m.serverName, Collections.<McpToolDto>emptyList(), NO_EXECUTOR);
         m.toolNames.clear();
     }
+
+    /** 摘一批工具用不到执行体, 但原语的签名要一个 —— 走到这里就说明有人要给空目录造执行体. */
+    private static final McpRegistry.ToolExecutorFactory NO_EXECUTOR =
+            new McpRegistry.ToolExecutorFactory() {
+                @Override public McpRegistry.ToolExecutor create(McpToolDto tool) {
+                    throw new IllegalStateException("dropping tools cannot need an executor: "
+                            + tool.getName());
+                }
+            };
 
     private void detach(Managed m, String reason) {
         dropTools(m);

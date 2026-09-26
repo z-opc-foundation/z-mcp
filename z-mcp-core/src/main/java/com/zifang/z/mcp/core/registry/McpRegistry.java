@@ -37,7 +37,17 @@ public class McpRegistry {
     /** 外部 server 工具重名时的命名空间分隔符. */
     public static final String NAMESPACE_SEPARATOR = "__";
 
-    private final Map<String, ToolEntry> tools = new ConcurrentHashMap<String, ToolEntry>();
+    /**
+     * 工具表是<b>一份整体换掉的快照</b>, 不是一张原地增删的表.
+     *
+     * <p>读它的人比写它的人多得多({@code tools/list}、{@code find_tools}、限流、审计、每次调用),
+     * 而"换一批外部工具"天然是<b>多次</b>写. 原地增删的话, 两次写之间来一读, 目录就是缺的 ——
+     * 偏偏同一次变更还要发 {@code notifications/tools/list_changed} 叫所有客户端来重取,
+     * 于是我们亲手把客户端领进自己刚造出来的空洞(09-26 实测: 12 条里读到 10 条; 单元层读到 {@code []}).
+     * 现在每次写都在锁内做出一份完整的新表、换掉这一个 volatile 引用, 读侧要么看到旧的整份、
+     * 要么看到新的整份.
+     */
+    private volatile Map<String, ToolEntry> tools = Collections.emptyMap();
     private final Map<String, McpServerDto> servers = new ConcurrentHashMap<String, McpServerDto>();
     private final Map<String, McpResourceDto> resources = new ConcurrentHashMap<String, McpResourceDto>();
     private final Map<String, McpResourceDto> resourceTemplates = new ConcurrentHashMap<String, McpResourceDto>();
@@ -122,33 +132,106 @@ public class McpRegistry {
         public String register(ToolExecutor executor) {
             if (executor == null) throw new IllegalArgumentException("executor required");
             String validated = validateName(name);
-            String effective = validated;
+            final ToolEntry entry;
+            String effective;
             synchronized (McpRegistry.this) {
-                ToolEntry existing = tools.get(effective);
-                if (existing == null || serverName == null) {
-                    if (existing != null) {
-                        throw new IllegalStateException("duplicate tool registration: " + effective
-                                + " already provided by "
-                                + (existing.serverName == null ? "(builtin)" : existing.serverName));
-                    }
-                } else {
-                    // 外部工具撞上内置/别人的工具: 加命名空间, 保住"内置优先"
-                    effective = serverName + NAMESPACE_SEPARATOR + validated;
-                    if (tools.containsKey(effective)) {
-                        throw new IllegalStateException("duplicate tool registration for server "
-                                + serverName + ": " + effective);
-                    }
-                }
-                tools.put(effective, new ToolEntry(effective, title, description, serverName,
-                        inputSchemaJson, outputSchemaJson, annotations, executor, origins));
+                Map<String, ToolEntry> next = new java.util.LinkedHashMap<String, ToolEntry>(tools);
+                effective = resolveName(next, validated, serverName);
+                entry = new ToolEntry(effective, title, description, serverName,
+                        inputSchemaJson, outputSchemaJson, annotations, executor, origins);
+                next.put(effective, entry);
+                tools = snapshot(next);
             }
             fireChanged(Change.TOOLS);
             return effective;
         }
     }
 
+    /**
+     * 把某个外部 server 的那一批工具<b>一次换到位</b>: 一次快照交换、一次 {@link Change#TOOLS}.
+     *
+     * <p>这就是 {@code ExternalServerManager} 重发布上游目录时缺的那块原语. 逐条
+     * {@code unregister} 再逐条 {@link Builder#register} 会播出一串变更(每一帧都在叫所有客户端
+     * 重取目录), 而其中每一帧里读到的目录都是缺一块的. 撞名规则与 {@link Builder#register}
+     * 共用 {@link #resolveName}, 所以生效名的算法只有一份.
+     *
+     * @return 这批工具的生效名(顺序与 {@code incoming} 相同)
+     */
+    public List<String> replaceServerTools(String serverName, List<McpToolDto> incoming,
+                                           ToolExecutorFactory factory) {
+        if (serverName == null) throw new IllegalArgumentException("serverName required");
+        if (factory == null) throw new IllegalArgumentException("factory required");
+        List<String> effective = new ArrayList<String>();
+        synchronized (this) {
+            Map<String, ToolEntry> next = new java.util.LinkedHashMap<String, ToolEntry>();
+            for (Map.Entry<String, ToolEntry> e : tools.entrySet()) {
+                // 别人提供的、内置的(serverName 为 null)一概原样留着 —— 这一批改的只有这一个 server
+                if (!serverName.equals(e.getValue().serverName)) next.put(e.getKey(), e.getValue());
+            }
+            for (McpToolDto dto : incoming) {
+                String validated = validateName(dto.getName());
+                String name = resolveName(next, validated, serverName);
+                next.put(name, new ToolEntry(name, dto.getTitle(), dto.getDescription(), serverName,
+                        dto.getInputSchemaJson(), dto.getOutputSchemaJson(), dto.getAnnotations(),
+                        factory.create(dto), dto.getOrigins()));
+                effective.add(name);
+            }
+            //  "把这家的东西换成它自己"这种空操作不许播变更: detach 一台从来没有工具的 server、
+            //  或上游一轮没动而调用方没先做签名判断, 都不该叫所有会话去重取目录.
+            if (!next.equals(tools)) tools = snapshot(next);
+            else return effective;
+        }
+        fireChanged(Change.TOOLS);
+        return effective;
+    }
+
+    /**
+     * 撞名规则(唯一一份): 名字空着 ⇒ 按原名; 被内置或别人占着而这条带 server 名 ⇒ 加
+     * {@code server__} 前缀保住"内置优先"; 前缀名也被占 ⇒ 重复注册. {@code current} 是"此刻已在
+     * 树上的那一批", 所以同一批里两条撞名也会在这里抛出来.
+     */
+    private static String resolveName(Map<String, ToolEntry> current, String validated,
+                                      String serverName) {
+        ToolEntry existing = current.get(validated);
+        if (existing == null || serverName == null) {
+            if (existing != null) {
+                throw new IllegalStateException("duplicate tool registration: " + validated
+                        + " already provided by "
+                        + (existing.serverName == null ? "(builtin)" : existing.serverName));
+            }
+            return validated;
+        }
+        String namespaced = serverName + NAMESPACE_SEPARATOR + validated;
+        if (current.containsKey(namespaced)) {
+            throw new IllegalStateException("duplicate tool registration for server "
+                    + serverName + ": " + namespaced);
+        }
+        return namespaced;
+    }
+
+    /** 整份工具表从这里出去, 且只从这里出去 —— 忘了走这一步的写就是下一个洞. */
+    private static Map<String, ToolEntry> snapshot(Map<String, ToolEntry> from) {
+        return Collections.unmodifiableMap(new java.util.LinkedHashMap<String, ToolEntry>(from));
+    }
+
+    /** 批量替换时按条目现造执行体(上游工具的执行体要绑住"它是哪一条"). */
+    public interface ToolExecutorFactory {
+        ToolExecutor create(McpToolDto tool);
+    }
+
     public void unregister(String name) {
-        if (tools.remove(name) != null) fireChanged(Change.TOOLS);
+        boolean removed;
+        synchronized (this) {
+            if (!tools.containsKey(name)) {
+                removed = false;
+            } else {
+                Map<String, ToolEntry> next = new java.util.LinkedHashMap<String, ToolEntry>(tools);
+                next.remove(name);
+                tools = snapshot(next);
+                removed = true;
+            }
+        }
+        if (removed) fireChanged(Change.TOOLS);
     }
 
     public boolean hasTool(String name) {

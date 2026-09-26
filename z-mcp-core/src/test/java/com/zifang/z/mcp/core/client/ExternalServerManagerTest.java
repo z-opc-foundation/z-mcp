@@ -675,6 +675,64 @@ public class ExternalServerManagerTest {
         assertEquals("对岸改了描述", "对岸改了描述", f.registry.lookup("b_own").description);
     }
 
+    /**
+     * 收进来的部分**真的**变了 ⇒ 目录必须**整份一次换到位**.
+     *
+     * <p>与上一条分得很开: 上一条量"被拒的部分抖动 ⇒ 一次 fire 都不许有", 这一条量"真有变更时,
+     * 那几次 fire 里读得到什么". 判据是**整份目录等于同步结束后的那份** —— 不是"少了 0 条"这种
+     * 数数, 因为逐条摘再逐条登的形状里, 中间那几拍读到的目录既可能少 acme 的两条、也可能只剩
+     * 邻居的一条, 而每一次 fire 都在同时对所有会话说"目录变了, 来重取 {@code tools/list}" ——
+     * 客户端按这句话来读, 读到的就是洞.
+     *
+     * <p>邻居那台(`other`)在这一轮里逐字未变, 它有两个用处: 让"读到的目录"不只有猎物一条可看,
+     * 也让"这台没变就不该播"跟着一起被数进 fires 里(它一条都不许贡献).
+     */
+    @Test
+    public void a_real_upstream_change_lands_as_one_whole_directory() throws Exception {
+        final Fixture f = new Fixture();
+        f.server("acme");
+        f.server("other");
+        FakeExchange acme = f.upstream("acme");
+        FakeExchange other = f.upstream("other");
+        String twoTools = "[{\"name\":\"a1\",\"description\":\"一\","
+                + "\"inputSchema\":{\"type\":\"object\"}},"
+                + "{\"name\":\"a2\",\"description\":\"二\",\"inputSchema\":{\"type\":\"object\"}}]";
+        String oneTool = "[{\"name\":\"a1\",\"description\":\"一改了\","
+                + "\"inputSchema\":{\"type\":\"object\"}}]";
+        String neighbour = "[{\"name\":\"n1\",\"description\":\"邻居的一条\","
+                + "\"inputSchema\":{\"type\":\"object\"}}]";
+        handshake(acme, "s1");
+        toolsPage(acme, twoTools);
+        handshake(other, "s1");
+        toolsPage(other, neighbour);
+
+        final List<String> seenDuringFire = new ArrayList<String>();
+        f.registry.addChangeListener(McpRegistry.Change.TOOLS, new Runnable() {
+            @Override public void run() { seenDuringFire.add(f.registry.toolNames().toString()); }
+        });
+        f.manager.syncAll();
+        assertEquals("首轮之后目录该有 3 条(a1/a2/n1): " + f.registry.toolNames(),
+                3, f.registry.toolCount());
+        assertTrue("首轮确实播过(否则下面的计数是在空跑上做的)", seenDuringFire.size() > 0);
+        seenDuringFire.clear();
+
+        // 真变更: acme 那一轮只剩一条, 且留下那条的描述改了; 邻居逐字不变
+        toolsPage(acme, oneTool);
+        toolsPage(other, neighbour);
+        f.manager.syncAll();
+
+        String finalDirectory = f.registry.toolNames().toString();
+        assertEquals("一次真变更只该播一次 —— 每一帧都是一次全体会话重取 tools/list: "
+                + seenDuringFire, 1, seenDuringFire.size());
+        assertEquals("fire 那一刻读到的目录必须已经是换到位的那份(摘一条+登一条的中间态就是洞): "
+                + seenDuringFire, finalDirectory, seenDuringFire.get(0));
+        // 阳性对照: 上面两句不许在"目录根本没动"的前提下成立
+        assertEquals("[a1, n1]", finalDirectory);
+        assertEquals("一改了", "一改了", f.registry.lookup("a1").description);
+        assertFalse("摘掉的那条必须真的不在了", f.registry.hasTool("a2"));
+        assertTrue("邻居那条一轮都不许被惊动", f.registry.hasTool("n1"));
+    }
+
     /** {@link ExternalServerManager} 起的那条周期线程叫这个. */
     private static final String HEALTH_THREAD = "z-mcp-server-health";
 
