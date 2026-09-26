@@ -271,16 +271,19 @@ Z_MCP_ROLE=text Z_MCP_PORT=18096 Z_MCP_BEARER_TOKENS="a-token,b-token" \
 
 顺带一条健康检查的形状：默认 hub 的两条上游端口上没人时，`/mcp/admin/health` 回 `DEGRADED` 并点名 `text`、`codec`（`unreachableServers`），启动日志留下两行 `mcp server text unavailable: Connection refused` —— 首连不在启动路径上，进程 1.0 秒起来，两条死上游既不拖慢启动也不把它报成 `UP`。
 
-### 250 上的实机部署（09-26 16:1x 起在跑，17:17 换成带来源链的那一枚）
+### 250 上的实机部署（09-26 16:1x 起在跑，17:17 换成带来源链的那一枚，23:37 换成 `7f92f61` 之后那一枚）
 
 同一枚 fat jar 在 192.168.31.250 上按角色起三个进程，端口就是上面那三个（**直连**，不碰 250 上共用的 nginx —— 那是别人的家目录）：
 
 ```
-~/zmcp/lib/z-mcp-server-0.2.0.jar   # sha256 306eaf33a1908896…bcfac091（17:17 重发，带来源链），与本机 target/ 逐字节同一枚
+~/zmcp/lib/z-mcp-server-0.2.0.jar   # sha256 0587fa659cb5c891…b9dd7b2eb4c69bc21d62，bytes=17998351（23:37 重发），与本机 target/ 逐字节同一枚
 ~/zmcp/logs/{hub,text,codec}.log
-~/zmcp/run/{hub,text,codec}.pid      # 26073 / 26021 / 26039
+~/zmcp/run/{hub,text,codec}.pid      # text 15951 / codec 15970 / hub 15989
 ~/zmcp/env.sh                        # 600，三把 token 只活在这里，重发时沿用（不换 token 才能证明"旧的能打通靠的是身份判据不是凭证"）
+~/zmcp/lib/keep/                     # 被替换掉的那一枚不删：z-mcp-server-0.2.0.jar.pre-7f92f61.6c5f7be9（18:23 起、跑了 5h11m 的那代字节）
 ```
+
+历代（同一台机器上按 sha256 前缀认）：17:17 那枚 `306eaf33…`（带来源链，pid 26073/26021/26039）→ 18:23 那枚 `6c5f7be9…`（`a8cee6a` 的字节，**不含 SSE 写失败要 `complete()` 那条修复**，pid 6597/6617/6636）→ 23:37 这枚 `0587fa65…`。
 
 口令不落版本库、不进命令行：`deploy_250.sh` 在远端 `openssl rand -hex 16` 现生成、写进 `~/zmcp/env.sh`（600），值不打印；本机验收用的 `~/.cache/zmcp_server_gauges/{hub,leaf}.hdr` 也是 600 的请求头文件，`curl -H @文件` 而不是 `-H "Authorization: Bearer …"` —— 后者会让同一台机器上任何一步 `ps` 读到它。**文档里记的是"口令在哪个文件"，不是口令本身。**
 
@@ -316,6 +319,26 @@ Z_MCP_ROLE=text Z_MCP_PORT=18096 Z_MCP_BEARER_TOKENS="a-token,b-token" \
 * **通知风暴**：同一条尺 `watch_churn.sh` → `churn_run5.log`，80 秒静默会话收到 **0** 帧 `list_changed`、**3** 帧 `:keep-alive`（后一句是必需的对照，否则 0 也可能只是流没开起来）。
 
 量具自己也交了一笔：第一版链探针把 body 过了一道 `sed -n 's/^data: //p'`，打出 **0 字节**，看着完全像"服务端根本没广告 `_meta`"。真相是 POST 的回执是 `application/json`（只有 `GET /mcp` 那条流才是 `text/event-stream`），body 里就没有 `data:` 前缀可抠。**空输出先怀疑量具，再怀疑被测方。**
+
+### 23:37 重发：把线上追回到 `7f92f61` 之后（#37 的断言改造与 #38 的签名修复都在这代字节里）
+
+"源码修好 ≠ 线上修好"这句话此前只是记账，这次它有读数了：被换掉的那枚 jar（`6c5f7be9…`，18:23 起、跑了 5h11m）是 `a8cee6a` 的字节，**SSE 写失败要 `complete()` 掉那条流**的修复在它的 class 文件里根本不存在。
+
+新的这枚是从 `90f18482affef148` 那棵树打的（与 CI 判绿的 `53ce20b` **代码逐字节相同**，`67a6e85` 只动 README，而整树哈希尺按设计不吃 README）：`mvn -B -ntp clean package -DskipTests -pl z-mcp-server -am`，构建 JDK 是 corretto `1.8.0_482`（250 上 `/usr/bin/java` 自报 `1.8.0_362`），日志 `~/.cache/zmcp_server_gauges/pkg_for_250_run5.log` 里 `BUILD SUCCESS`、`Total time: 11.925 s`、`Finished at 2026-09-26T23:36:10+08:00`，**构建前后各取一枚整树哈希同为 `90f18482affef148`** —— 少这一步，"这枚 jar 来自我量过的那棵树"就只是意图。
+
+判"哪一代字节在 jar 里"仍然只能读 jar 内的字节，这次有两类证据：
+
+* **常量池字面量**：读 `BOOT-INF/lib/z-mcp-core-0.2.0.jar` 里 `McpSessionStore*` / `ExternalServerManager*` 的 class 字节，新 jar 含 `dropped an SSE stream after a send failure`、`dropped an SSE stream during keep-alive`、`closed {} SSE stream(s)` 三行且 `returned {} tool(s) that this server` 在，**旧 jar 三行全无**（`keep-alive tick failed` 两边都在，正好当"读法没坏"的阳性对照）。
+* **调用点计数**：`javap -p -c` 数 `McpSessionStore$McpSession` 里的 `SseEmitter.complete` —— 新 **3** 处、旧 **1** 处。注意别拿"字符串 `complete` 在 class 里出现几次"当尺：常量池会去重，新旧都是 1 次，那条尺结构上分辨不了任何东西。
+
+量具自己也绊了一下：第一版用 macOS 的 `strings` 扫 class 文件，它把 class 认成 fat binary 直接报错、`grep -c` 得到 **0** —— 那是一个**坏掉的尺印出的"零命中"**，与"字节里真的没有"长得一模一样。换成 python `zipfile` 读原始字节再找子串才有上面那组读数。
+
+部署与复验（`deploy_250.sh` → 本轮四行 jar 预检 PASS → 三枚端口空 → scp → 本机与远端 sha256 逐字节相同、`bytes=17998351` → 按 text→codec→hub 起 → 三枚端口各回 401）：
+
+* **40 条跨机验收**：`verify_250.sh` → `verify_250_run6.log`，`合计 PASS=40 FAIL=0`，40 行 PASS 逐条打印。
+* **官方 python SDK 互操作**：`interop_sdk.py` → `interop_sdk_run9.log`，`PASS=33 FAIL=0 NOT_COVERED=2`（那两格还是黑盒里做不到的 `list_changed` 与 `Last-Event-ID` 续传，记账口径没变）。
+* **通知风暴**：`watch_churn.sh` → `churn_run6.log`，80 秒静默会话收到 **0** 帧 `list_changed`、**3** 帧 `:keep-alive`（对照组在，"0"才不是"流没开起来"）。
+* **真进程侧的"目录不动"**：hub 日志一共 20 行、`grep -cE "WARN|ERROR"` 为 **0**，`aggregated 2 of 2 upstream tool(s)` 恰好两行（每台上游首连一次），此后 14 轮健康检查一行都没再多 —— 与 #38 想要的形状一致：不重发布不是"少发通知"，而是**什么都不发生**。
 
 ### 挂进真实 MCP 客户端
 
