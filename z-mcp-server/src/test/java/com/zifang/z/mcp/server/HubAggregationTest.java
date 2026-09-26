@@ -1,14 +1,24 @@
 package com.zifang.z.mcp.server;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.zifang.z.mcp.api.dto.McpToolDto;
+import com.zifang.z.mcp.core.client.ExternalServerManager;
+import com.zifang.z.mcp.core.client.JsonRpcExchange;
+import com.zifang.z.mcp.core.properties.McpProperties;
+import com.zifang.z.mcp.core.registry.McpRegistry;
 import org.junit.After;
 import org.junit.Test;
 import org.springframework.context.ConfigurableApplicationContext;
 
+import java.io.IOException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Deque;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -210,6 +220,221 @@ public class HubAggregationTest {
                 0, serverOfJson(state, "codec").path("toolCount").asInt());
         assertEquals(2, serverOfJson(state, "text").path("toolCount").asInt());
         assertTrue(serverOfJson(state, "codec").path("lastError").asText().length() > 0);
+    }
+
+    /**
+     * 一台上游死过一次之后, "detached" 这句话只能说一遍 —— 后面的轮次要说实话.
+     *
+     * <p>生产上的形状（250 实测，`detach_repeat.sh r1` → `detach_repeat_r1/run.log`）：摘掉一台
+     * 本来在目录里的叶子之后，hub 每 30 秒播一行 INFO {@code mcp server text detached (unreachable)}，
+     * 静置 135 秒就是 <b>5 行</b>。第一行之后目录里早就没有它的工具、也没有活的传输可关，那 4 行
+     * 在描述一件已经结束的事 —— 读日志的人会据此以为这台 hub 每分钟摘除一次上游。
+     *
+     * <p>写法上刻意不碰时间："<em>至少 4 轮已经跑过</em>"是<b>前置条件</b>（轮数只单调涨，等得到），
+     * "INFO 恰好一行"是<b>不变量</b>（与跑了几轮无关）。把断言反过来写成"4 轮里有 4 行"就又是
+     * {@code #37} 那次 CI 红的形状（同一条健康检查线程，时间耦合的判据在慢机器上必输）。
+     *
+     * <p>两条一起才咬得住：只判"INFO 不再重复"会被"一次都不说"混过去，所以第一行必须留在 INFO 档上；
+     * 只判"有一行 INFO"会被"每行都是 INFO"混过去，所以要等到重复轮出现。
+     */
+    @Test public void an_upstream_that_stays_down_says_detached_exactly_once() throws Exception {
+        List<String> servers = new ArrayList<String>();
+        int text = upstream("text");
+        ConfigurableApplicationContext codecCtx = leaf("codec");
+        addServer(servers, 0, "text", text);
+        addServer(servers, 1, "codec", Boot.port(codecCtx));
+        //  先装 appender 再起 hub: 首轮同步发生在上下文启动的路上, 晚一步就抓不到那条"真的摘了东西"的 INFO.
+        startUpstreamLog();
+        try {
+            Wire hub = Wire.client(hubOf(servers));
+            List<String> both = new ArrayList<String>(HUB_LOCALS);
+            both.addAll(Arrays.asList("base64_codec", "hash_digest", "text_stats", "text_transform"));
+            awaitCatalog(hub, both);
+
+            codecCtx.close();
+
+            //  等的时候每次现读 appender(它是会往下涨的), 判的时候只读一份快照:
+            //  拿一份快照去"等够 4 轮"是等不到的 —— 快照不跟着长, 那条 until 会一直空转到超时.
+            Boot.until(System.currentTimeMillis() + DEADLINE_MILLIS,
+                    "codec 死后至少 4 轮健康检查各自留了一行 unavailable", new Boot.Probe() {
+                        @Override public String inspect() {
+                            int rounds = countLines(upstreamLog(), "unavailable:");
+                            if (rounds < 4) {
+                                throw new Boot.ExpectationPending("才 " + rounds + " 轮");
+                            }
+                            return rounds + " 轮";
+                        }
+                    });
+
+            final List<String> said = upstreamLog();
+            assertEquals("摘除这件事被说了几遍: " + said,
+                    1, countLines(said, "INFO mcp server codec detached (unreachable)"));
+            assertTrue("重复的那些轮必须说'本来就不在目录里', 而不是什么都不说: " + said,
+                    countLines(said, "DEBUG mcp server codec was already detached") >= 1);
+            //  当前状态该每轮都说(这是归因用的, 与"摘除"是两件事): 前置条件已经保证 >=4 轮.
+            assertTrue("每一轮都该留下为什么连不上: " + said,
+                    countLines(said, "WARN mcp server codec unavailable:") >= 4);
+        } finally {
+            stopUpstreamLog();
+        }
+    }
+
+    /**
+     * 上一条打的是"传输还活着时摘除"那一格; 这一条补另一半 —— <em>只有工具、传输已死</em>.
+     *
+     * <p>真 HTTP 上游造不出这一格, 不是省事才用假传输: {@code HttpJsonRpcExchange.isAlive()} 只有
+     * {@code close()} 才翻面, 上游进程死了 hub 手里的标志仍是 true, 于是上一条里首轮那句 INFO 是
+     * 被 {@code had_transport} 撑起来的(把那半边摘掉的变异, 输出与对照逐字节相同). 而 stdio 上游的
+     * 子进程一退就是这个形状 —— 握手记在 client 里、目录还挂着它的工具、管道不再回答
+     * ({@code JsonRpcExchange.isAlive()} 的注释对这一语义就是这么定义的). 摘掉的判据只剩
+     * {@code had_tools}, 所以这一格必须单独有字为证.
+     */
+    @Test public void an_upstream_that_loses_only_its_transport_still_says_detached_once()
+            throws Exception {
+        final List<GhostExchange> made = new ArrayList<GhostExchange>();
+        final McpRegistry registry = new McpRegistry();
+        McpProperties props = new McpProperties();
+        props.setHealthCheckIntervalSeconds(0);        // 一轮一轮手动同步, 不把判据交给计时器
+        props.setServerName("hub-under-test");         // 别撞上对岸广告的 "leaf": 那是自指判据
+        McpProperties.ServerConfig cfg = new McpProperties.ServerConfig();
+        cfg.setName("ghost");
+        cfg.setTransport("stdio");
+        cfg.setCommand("/bin/true");
+        props.getServers().add(cfg);
+        ExternalServerManager manager = new ExternalServerManager(registry, props,
+                new com.fasterxml.jackson.databind.ObjectMapper(),
+                new ExternalServerManager.ExchangeFactory() {
+                    @Override public JsonRpcExchange create(McpProperties.ServerConfig config) {
+                        GhostExchange e = new GhostExchange();
+                        made.add(e);
+                        if (made.size() == 1) {
+                            e.script.add(handshake("s1"));
+                            e.script.add(accepted());
+                            e.script.add(toolsPage("[{\"name\":\"ghost_alpha\"},"
+                                    + "{\"name\":\"ghost_beta\"}]"));
+                        } else {
+                            e.alive = false;           // 换一条新传输也还是没人在
+                        }
+                        return e;
+                    }
+                });
+
+        startUpstreamLog();
+        try {
+            manager.syncAll();
+            assertTrue("第一轮该把两条工具收进目录: " + namesOf(registry),
+                    registry.hasTool("ghost_alpha") && registry.hasTool("ghost_beta"));
+
+            made.get(0).alive = false;                 // 子进程退了: 标志还在, 管道不再回答
+            manager.syncAll();
+            assertFalse("传输都死了还在广告调不动的工具: " + namesOf(registry),
+                    registry.hasTool("ghost_alpha"));
+
+            manager.syncAll();                         // 再来一轮, 这次目录里本来就没东西
+
+            List<String> said = upstreamLog();
+            assertEquals("只有工具没有传输, 那句 detached 也必须说(而且只说一次): " + said,
+                    1, countLines(said, "INFO mcp server ghost detached (unreachable)"));
+            assertTrue("重复的那一轮该说'本来就不在目录里', 不是什么都不说: " + said,
+                    countLines(said, "DEBUG mcp server ghost was already detached") >= 1);
+            assertEquals("已死的传输不能被继续复用, 每轮该换一条: " + made.size(),
+                    2, made.size());
+        } finally {
+            stopUpstreamLog();
+        }
+    }
+
+    /** 脚本答完就没人了 —— 与 core 那份 {@code FakeExchange} 同语义, 差别只在这一份要给日志当证人. */
+    private static final class GhostExchange implements JsonRpcExchange {
+        final Deque<JsonRpcExchange.Response> script =
+                new ArrayDeque<JsonRpcExchange.Response>();
+        boolean alive = true;
+
+        @Override public JsonRpcExchange.Response post(String body, Map<String, String> header)
+                throws IOException {
+            if (!alive) throw new IOException("transport is gone");
+            JsonRpcExchange.Response r = script.poll();
+            if (r == null) throw new IOException("no scripted answer for: " + body);
+            return r;
+        }
+
+        @Override public void close() { }
+
+        @Override public boolean isAlive() { return alive; }
+    }
+
+    private static JsonRpcExchange.Response handshake(String sessionId) {
+        Map<String, String> h = new LinkedHashMap<String, String>();
+        h.put("Mcp-Session-Id", sessionId);
+        return new JsonRpcExchange.Response(200, "application/json",
+                "{\"jsonrpc\":\"2.0\",\"result\":{\"protocolVersion\":\"2025-06-18\","
+                        + "\"serverInfo\":{\"name\":\"leaf\",\"version\":\"1\"}}}", h);
+    }
+
+    private static JsonRpcExchange.Response accepted() {
+        return new JsonRpcExchange.Response(202, null, "", null);
+    }
+
+    private static JsonRpcExchange.Response toolsPage(String toolsJson) {
+        return new JsonRpcExchange.Response(200, "application/json",
+                "{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":" + toolsJson
+                        + ",\"nextCursor\":\"\"}}", null);
+    }
+
+    private static List<String> namesOf(McpRegistry registry) {
+        List<String> out = new ArrayList<String>();
+        for (McpToolDto t : registry.listTools()) out.add(t.getName());
+        return out;
+    }
+
+    /**
+     * {@code ExternalServerManager} 说过的话, 打成 {@code 级别 正文} 收进内存.
+     *
+     * <p>级别必须在场：这条判据分的正是"第一遍是 INFO、后面是 DEBUG"，只收正文的话两行长得一样，
+     * 计数会把两种消息混成一堆。收法与 z-mcp-starter 那份 {@code ServerSideLogCapture} 同源
+     * （{@code stop()} 要把级别还回去、appender 要摘干净），但那份钉的是会话与控制器两个
+     * logger，不在这儿的判据上。
+     */
+    private static final ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>
+            UPSTREAM_EVENTS = new ch.qos.logback.core.read.ListAppender<
+            ch.qos.logback.classic.spi.ILoggingEvent>();
+    private static ch.qos.logback.classic.Level upstreamLogLevelBefore;
+
+    private static ch.qos.logback.classic.Logger upstreamLogger() {
+        return ((ch.qos.logback.classic.LoggerContext)
+                org.slf4j.LoggerFactory.getILoggerFactory())
+                .getLogger(com.zifang.z.mcp.core.client.ExternalServerManager.class.getName());
+    }
+
+    private static void startUpstreamLog() {
+        ch.qos.logback.classic.Logger log = upstreamLogger();
+        upstreamLogLevelBefore = log.getLevel();
+        log.setLevel(ch.qos.logback.classic.Level.DEBUG);
+        UPSTREAM_EVENTS.start();
+        UPSTREAM_EVENTS.list.clear();
+        log.addAppender(UPSTREAM_EVENTS);
+    }
+
+    private static void stopUpstreamLog() {
+        ch.qos.logback.classic.Logger log = upstreamLogger();
+        log.detachAppender(UPSTREAM_EVENTS);
+        log.setLevel(upstreamLogLevelBefore);
+        UPSTREAM_EVENTS.stop();
+    }
+
+    /** 现取一份快照(不往下跟着涨), 好让"等够了再判"这两步读的是同一批行. */
+    private static List<String> upstreamLog() {
+        List<String> out = new ArrayList<String>();
+        for (ch.qos.logback.classic.spi.ILoggingEvent e : UPSTREAM_EVENTS.list) {
+            out.add(e.getLevel() + " " + e.getFormattedMessage());
+        }
+        return out;
+    }
+
+    private static int countLines(List<String> lines, String needle) {
+        int n = 0;
+        for (String l : lines) if (l.contains(needle)) n++;
+        return n;
     }
 
     // ---------------------------------------------------------------- 上游鉴权

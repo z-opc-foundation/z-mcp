@@ -287,7 +287,23 @@ public class ExternalServerManager {
                 }
             };
 
+    /**
+     * 把一条上游从目录里摘掉, 并把"摘掉了东西"这件事说一句话.
+     *
+     * <p>那句"说了没有"是这一版新加的判断, 不是修辞: {@code syncOne} 每一轮都会为连不上的上游
+     * 现造一个 client、{@code connect()} 抛、然后走进这里, 于是一台**持续**不可达的上游每 30 秒
+     * 播一行 INFO {@code detached (unreachable)} —— 250 上实测 135 秒里 5 行, 而第一行之后目录里
+     * 早就没有它的工具、也没有活的传输可关, 那 4 行在描述一件已经结束的事(读日志的人会按"每分钟
+     * 摘除一次"理解这台 hub 的健康度)。所以这句只按"手上到底有没有东西"分档, 判据取状态本身:
+     * 目录里有没有它的条目、传输是不是真连着。{@code had_transport} 用 {@code isConnected()} 而不是
+     * {@code m.client != null} —— 后者每一轮都成立(上一句说的现造 client), 拿它分档等于不分。
+     *
+     * <p>反过来, 自指的上游会**每轮**都说一句 INFO, 那是真的: 每一轮确实建起了一条传输又把它关掉。
+     * 别把这条也当成噪声一起压掉, 否则"关掉了一条活传输"这件事就没地方留字了。
+     */
     private void detach(Managed m, String reason) {
+        boolean had_tools = !m.toolNames.isEmpty();
+        boolean had_transport = m.client != null && m.client.isConnected();
         dropTools(m);
         //  条目已经不在目录里了, 签名也就作废: 否则"摘除后上游原样回来"会被当成没变更而不重发布.
         m.publishedSignature = null;
@@ -302,7 +318,12 @@ public class ExternalServerManager {
             m.client = null;
         }
         registry.unregisterServer(m.serverName);
-        log.info("mcp server {} detached ({})", m.serverName, reason);
+        if (had_tools || had_transport) {
+            log.info("mcp server {} detached ({})", m.serverName, reason);
+        } else {
+            log.debug("mcp server {} was already detached ({}), 这一轮没有东西可摘",
+                    m.serverName, reason);
+        }
     }
 
     // ------------------------------------------------------------------ 健康检查
