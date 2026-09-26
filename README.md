@@ -271,19 +271,19 @@ Z_MCP_ROLE=text Z_MCP_PORT=18096 Z_MCP_BEARER_TOKENS="a-token,b-token" \
 
 顺带一条健康检查的形状：默认 hub 的两条上游端口上没人时，`/mcp/admin/health` 回 `DEGRADED` 并点名 `text`、`codec`（`unreachableServers`），启动日志留下两行 `mcp server text unavailable: Connection refused` —— 首连不在启动路径上，进程 1.0 秒起来，两条死上游既不拖慢启动也不把它报成 `UP`。
 
-### 250 上的实机部署（09-26 16:1x 起在跑，17:17 换成带来源链的那一枚，23:37 换成 `7f92f61` 之后那一枚）
+### 250 上的实机部署（09-26 16:1x 起在跑，17:17 换成带来源链的那一枚，23:37 换成 `7f92f61` 之后那一枚，09-27 00:0x 换成 `c3d43b5` 之后那一枚）
 
 同一枚 fat jar 在 192.168.31.250 上按角色起三个进程，端口就是上面那三个（**直连**，不碰 250 上共用的 nginx —— 那是别人的家目录）：
 
 ```
-~/zmcp/lib/z-mcp-server-0.2.0.jar   # sha256 0587fa659cb5c891…b9dd7b2eb4c69bc21d62，bytes=17998351（23:37 重发），与本机 target/ 逐字节同一枚
+~/zmcp/lib/z-mcp-server-0.2.0.jar   # sha256 66497baee6230157…49ff56cb，bytes=18001570（09-27 00:0x 重发），与本机 target/ 逐字节同一枚
 ~/zmcp/logs/{hub,text,codec}.log
-~/zmcp/run/{hub,text,codec}.pid      # text 15951 / codec 15970 / hub 15989
+~/zmcp/run/{hub,text,codec}.pid      # 00:18 收尾时 text 9585 / codec 9603 / hub 9632（A/B 换过两次 jar、每杠都重启，pid 只按"当下这块盘"记）
 ~/zmcp/env.sh                        # 600，三把 token 只活在这里，重发时沿用（不换 token 才能证明"旧的能打通靠的是身份判据不是凭证"）
-~/zmcp/lib/keep/                     # 被替换掉的那一枚不删：z-mcp-server-0.2.0.jar.pre-7f92f61.6c5f7be9（18:23 起、跑了 5h11m 的那代字节）
+~/zmcp/lib/keep/                     # 被替换掉的都不删：…jar.pre-7f92f61.6c5f7be9（18:23 那代）、…jar.pre-39.0587fa65（23:37 那代，即 `7f92f61` 的字节）
 ```
 
-历代（同一台机器上按 sha256 前缀认）：17:17 那枚 `306eaf33…`（带来源链，pid 26073/26021/26039）→ 18:23 那枚 `6c5f7be9…`（`a8cee6a` 的字节，**不含 SSE 写失败要 `complete()` 那条修复**，pid 6597/6617/6636）→ 23:37 这枚 `0587fa65…`。
+历代（同一台机器上按 sha256 前缀认）：17:17 那枚 `306eaf33…`（带来源链，pid 26073/26021/26039）→ 18:23 那枚 `6c5f7be9…`（`a8cee6a` 的字节，**不含 SSE 写失败要 `complete()` 那条修复**，pid 6597/6617/6636）→ 23:37 那枚 `0587fa65…`（`7f92f61` 的字节，含 #30 不含 #39）→ 09-27 00:0x 这枚 `66497bae…`（`c3d43b5` 的字节，含 #39 的整批替换）。归档不删是因为**它能当对照**：00:1x 那次 A/B 就是拿 `lib/keep/` 里那枚换上去量的（下一节）。
 
 口令不落版本库、不进命令行：`deploy_250.sh` 在远端 `openssl rand -hex 16` 现生成、写进 `~/zmcp/env.sh`（600），值不打印；本机验收用的 `~/.cache/zmcp_server_gauges/{hub,leaf}.hdr` 也是 600 的请求头文件，`curl -H @文件` 而不是 `-H "Authorization: Bearer …"` —— 后者会让同一台机器上任何一步 `ps` 读到它。**文档里记的是"口令在哪个文件"，不是口令本身。**
 
@@ -339,6 +339,39 @@ Z_MCP_ROLE=text Z_MCP_PORT=18096 Z_MCP_BEARER_TOKENS="a-token,b-token" \
 * **官方 python SDK 互操作**：`interop_sdk.py` → `interop_sdk_run9.log`，`PASS=33 FAIL=0 NOT_COVERED=2`（那两格还是黑盒里做不到的 `list_changed` 与 `Last-Event-ID` 续传，记账口径没变）。
 * **通知风暴**：`watch_churn.sh` → `churn_run6.log`，80 秒静默会话收到 **0** 帧 `list_changed`、**3** 帧 `:keep-alive`（对照组在，"0"才不是"流没开起来"）。
 * **真进程侧的"目录不动"**：hub 日志一共 20 行、`grep -cE "WARN|ERROR"` 为 **0**，`aggregated 2 of 2 upstream tool(s)` 恰好两行（每台上游首连一次），此后 14 轮健康检查一行都没再多 —— 与 #38 想要的形状一致：不重发布不是"少发通知"，而是**什么都不发生**。
+
+### 00:0x 重发：#39 的整批替换进线，并在真进程上做一杠"摘一台上游、数帧"的 A/B
+
+`c3d43b5` 那笔（注册表补上 `replaceServerTools`，一次真变更只播一帧）此前只有单元层读数，而单元尺是在 `fireChanged` 的回调里读目录的 —— 它结构上分辨不了"整份快照替换"与"就地逐条改、最后只 fire 一次"。这一杠补的是**另一个进程**的视角：挂一条 SSE 流在 hub 上，按秒轮 `tools/list`，然后真把一台叶子杀掉，看流上落下几帧、轮询里读到过哪些目录。
+
+**这枚 jar 是哪一棵树**。`mvn -B -ntp clean package -DskipTests -pl z-mcp-server -am`（corretto `1.8.0_482`）→ `pkg_for_250_run6.log` 的 `BUILD SUCCESS` / `Total time: 5.270 s` / `Finished at 2026-09-27T00:00:25+08:00`，产物 sha256 `66497baee6230157…49ff56cb`、`bytes=18001570`；`deploy_250_run2.log` 走的是那套固定流程（四行 jar 内 YAML 预检 PASS → 三枚端口确认空 + 只列别人的 JVM → scp → 本机与远端 sha256 逐字节同 → text→codec→hub → 三枚端口各回 `401`）。**这一杠的自证有个缺口**：上一节那句"构建前后各取一枚整树哈希"是当时在命令行上另跑的，**没进这份日志**，所以换一个 clone 就复现不出"jar ← 那棵树"。这次改成事后补算，两条读数：`git archive HEAD | tar -x` 到临时目录重算 = `ba2e71fb2d5b9b5f`（76 文件），本机工作树现算 = **同一个值**、`git status --porcelain -uall` 为空；而 `c3d43b5`→`d3e822b` 之间 `git diff --name-only` 只有 `README.md` 一行（这把尺按设计不吃 README）⇒ 提交树、工作树、以及 296 条测试那棵树是同一份构建输入。**下次构建把两枚哈希打进同一份日志**，别靠"我记得我当时取了"。
+
+**三枚 jar 的字节对账**（`jar_symbol_check.sh` → `jar_symbol_check_run2.log`；读的是 fat jar 里 `BOOT-INF/lib/z-mcp-core-0.2.0.jar` 的 class 原始字节）：
+
+| jar | #39 四支（`replaceServerTools`×2 / `ToolExecutorFactory` / `resolveName`） | #30 两支（`after a send failure` / `during keep-alive`） | 同文件阳性对照 | 类数 reg/ext/ses |
+| --- | --- | --- | --- | --- |
+| 在跑的 `66497bae`（`c3d43b5`） | **HIT** | HIT | 4/4 HIT | 20 / 9 / 6 |
+| 归档 `0587fa65`（`7f92f61`） | **MISS ×4** | HIT | 4/4 HIT | 19 / 7 / 6 |
+| 归档 `6c5f7be9`（`a8cee6a`） | **MISS ×4** | **MISS ×2** | 4/4 HIT | 19 / 7 / 6 |
+
+中间那一行就是这次要的分辨力：**同一个 `ExternalServerManager` 里，#30 的字面量在、#39 的不在** ⇒ 线上那枚确实停在 `7f92f61`，而不是"我看不出来"。最底那一行顺手把 23:37 那节里"`a8cee6a` 的字节不含 `complete()` 修复"从叙述升成读数（当时只有 `javap` 数调用点）。类数 20 vs 19 是 #39 新增的嵌套类 `ToolExecutorFactory`，`ext` 9 vs 7 是它带出的 lambda。
+
+这把尺自己的第一版是坏的，而且**坏在朝"没修好"的方向**：它按 `McpSessionStore.class` 只取外层类，而那句 `dropped an SSE stream after a send failure` 在 `McpSessionStore$McpSession.class` 里 ⇒ 连**在跑的这枚**都报 MISS。改成"一个前缀下全部嵌套类拼起来搜"，并加一条硬规矩：**任何一支阳性对照 MISS ⇒ 整份读数作废**（脚本 `exit 3`）。缺席的读数必须先证明"读法能读到东西"，否则它与"抠错了构件"长得一模一样。
+
+**A/B 的读数**（`detach_frames.sh`，两杠各自留 `run.log` + `stream.txt` + `readings.txt` + `recover.txt`）：
+
+| 部署的 jar | 摘一台上游（`text`，2 条工具）| 流上 `list_changed` 帧数 | 每秒轮询读到的条数分布 | 恢复后 |
+| --- | --- | --- | --- | --- |
+| `0587fa65`（pre-#39，`ab_round_b/run.log` 里 `deployed=` 打了全值） | 10 → 8 | **2** | 18×10、2×8 | `RECOVERED=10` |
+| `66497bae`（含 #39，`detach_new39b/run.log`） | 10 → 8 | **1** | 16×10、2×8 | `RECOVERED=10` |
+
+对得上机制：hub 目录 10 条 = 6 内置 + 2 text + 2 codec，摘掉 `text` 就是摘 2 条；旧写法逐条 `unregister` ⇒ **帧数 == 被摘的条数**，改走整批替换后恒为 1。单元层那次红是三帧（`[[a2, n1], [n1], [a1, n1]]`），同一个形状在真进程上按 1 Hz 采样只会撞进那一两毫秒的窗口，所以两杠都**没**读到过 9 条 —— 这不是"洞不存在"，洞在不在由单元那把尺钉（它能造出中间帧），线级这把只回答"广播出去几帧"。**这条尺的天花板要照写**：它分辨不了帧内目录是否自洽，只分辨帧数。
+
+pre-39 那一杠量了**两遍**，只有第二遍算数。第一遍（`detach_pre39_raced_0010/`）的 `readings.txt` 自洽（21×10、2×8、`RECOVERED=10`），但它的 `run.log` 被我一条并发的重复手跑截走了 —— 那一趟停在"pid 确实不是 z-mcp-server 的进程"的守卫上没动手，却先把日志文件清空 ⇒ **"当时部署的是哪一枚 jar"这一环没了留档**。更要紧的是 `stream.txt`：两支 curl 用各自的 fd 往**同一个路径**写，先跑的那支按偏移继续落盘、后跑的那支从 0 截断，那份"2 帧"里哪一帧是谁读到的没有记录。所以第一遍整体降为旁证，按"复现不出来的绿不算证据"换 jar 重来（`ab_round_b.sh`：换归档 jar → 现打 `deployed=` 全值 → 量 → 换回 → 三端口复验 alive），**第二遍才是表里那一行**：2 帧、`RECOVERED=10`、`stream.txt` 里 `id:2` 与 `id:3` 两帧都点着 `notifications/tools/list_changed`。"两条写者共用一份输出文件"这件事以前只在别人的事故里见过，这次是我自己一手发的。
+
+部署完之后三档验收**必须在换完 jar 的最终这块盘上重量**（`reverify_after39.sh 8`，A/B 结束、进程全部重启之后）：`verify_250_run8.log` = `合计 PASS=40 FAIL=0`；`interop_sdk_r8.log` = `PASS=33 FAIL=0 NOT_COVERED=2`（官方 python SDK 那两格仍在黑盒之外，口径没变）；`churn_run8.log` = 80 秒静默会话收到 **0** 帧 `list_changed`、**2** 帧 `:keep-alive`、priming 三项各 1（开流注释 / `retry` / 首个可续传坐标 = **1**）。顺带一条计数的坑：那份驱动里的 `grep -c FAIL` 报 `FAIL_rows=1`，数到的正是 `合计 PASS=40 FAIL=0` 这一行本身 —— **只认 `合计` 那行，别认 grep 的行数**。
+
+两把量具的修法也留在这里（都属于"尺坏了会读成零命中"那一族）：① 第一版 `detach_frames.sh` 照抄 `watch_churn` 用 `sed -n 's/^data: //p'` 解 POST 的 `tools/list`，而 POST 的回执是 `application/json` ⇒ 每条读数都是 `ERR Expecting value…`，而那道 `[ "$BEFORE" != "ERR" ] || exit 1` 的闸**没挡住**（要判的是"以 ERR 开头"，不是"等于 ERR"）。② `watch_churn.sh` 里那行 `priming(id: 0)` 结构上永远是 **0**：priming 帧的 id 取 `nextSeq()` = `seq.incrementAndGet()`，首枚是 1 不是 0 —— 一个恒为 0 的计数器长得和"没补发"一模一样，靠读原始 `churn_stream.txt` 才发现，现在改数 `^:z-mcp stream open` / `^retry:` / `^id:[0-9]+$` 三支；`:keep-alive` 那句也从"3 帧"改成"判 ≥1"（30s 间隔 / 80s 窗口本来就会给出 2 或 3，钉常量必漂）。
 
 ### 挂进真实 MCP 客户端
 
