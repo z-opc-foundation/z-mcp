@@ -5,11 +5,17 @@
 #
 # 两个 JDK 都要跑, 不是冗余:
 #   - 8  是 pom 里 source/target 的基线, 也是唯一被承诺支持的版本;
-#   - 17 是下游 z-opc / Boot 3 实际运行的版本. 只用 8 编译通过不代表 17 上跑得起来
-#     (本仓的 stdio 传输会用当前 JVM 起子进程, JDK 差异会在那里暴露).
-# 两者均已在本机实测: 175 core + 7 admin + 53 starter = 235, 0 failures、0 skipped
-# (09-26 各一次 clean verify, 日志在 ~/.cache/zmcp_logs/verify_jdk{8,17}.log,
-#  每份日志开头自报 JVM、结尾自报被测源码的前后 md5).
+#   - 17 是这个构件对外发布后 Boot 3 一侧消费者会跑的版本(官方 java-sdk 自己就要求 17+)。
+#     注意它**不是**"本机下游的实际版本" —— 实测 250 上在跑的两台 host JVM 都是 1.8.0_362,
+#     而 z-opc 根本没有依赖本仓(见 README 有意边界), 所以这一格守的是未来, 不是现状。
+#     只用 8 编译通过不代表 17 上跑得起来(本仓的 stdio 传输会用当前 JVM 起子进程, JDK 差异会在那里暴露)。
+# 两者均已在本机实测: 195 core + 54 starter + 21 server + 7 admin = 277, 0 failures、0 skipped
+# (各一次 clean verify, 日志在 ~/.cache/zmcp_server_gauges/pair_jdk{8,17}.log,
+#  每份日志开头自报 JVM、结尾自报 exit=0, 且每次运行前后各有一枚整树聚合哈希 —— 四枚一致。
+#  哈希的**值**与跑的时刻都不写在这里: 这行注释本身是被哈希的 .yml 之一, 写死就永远对不上;
+#  时刻与哈希记在日志里, README 的"构建与测试"一节抄同一份日志。)
+# 矩阵跑的是整个 reactor, 所以新增模块(含 z-mcp-server)不需要在这里另外登记 —— 但反过来说,
+# 这句注释里的数字**不会**自己跟着涨, 加了模块记得改它。
 
 name: ci
 

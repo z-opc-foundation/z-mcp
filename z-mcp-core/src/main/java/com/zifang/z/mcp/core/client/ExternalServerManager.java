@@ -15,6 +15,8 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
@@ -130,11 +132,32 @@ public class ExternalServerManager {
                         properties.getServerName(), properties.getServerVersion());
             }
             if (!m.client.isConnected()) m.client.connect();
+            // 自指的上游必须先拒, 再谈拉目录: hub 指向"另一台 hub"而那就是自己(或同配置的复制品)时,
+            // 对岸的目录装的是我这台的副本, 撞名分支会给它 invent 一个新前缀名 —— 每同步一轮长一代,
+            // 实测十分钟里目录从 150 涨到 228. 判据取握手回来的 serverInfo.name 而不是 endpoint:
+            // 换端口、走 localhost 还是走机器名, 自指都是同一个名字.
+            String advertised = m.client.serverInfo() == null
+                    ? null : m.client.serverInfo().path("name").asText(null);
+            if (advertised != null && advertised.equals(properties.getServerName())) {
+                detach(m, "self-referential");
+                m.lastError = "upstream " + name + " identifies itself as this server (" + advertised
+                        + ") — 聚合它等于把自己的目录再抄一遍, 目录会随同步轮数无界增长";
+                m.lastSyncMillis = System.currentTimeMillis();
+                log.warn("mcp server {} refused: {}", name, m.lastError);
+                return;
+            }
             List<McpToolDto> tools = m.client.listTools();
-            publish(m, config, tools);
+            boolean republished = publish(m, config, tools);
             m.lastError = null;
             m.lastSyncMillis = System.currentTimeMillis();
-            log.info("mcp server {} aggregated {} tool(s)", name, Integer.valueOf(tools.size()));
+            if (republished) {
+                // 收进来的条数, 不是上游广告的条数 —— 两者不等就说明上面那条环检测起作用了
+                log.info("mcp server {} aggregated {} of {} upstream tool(s)",
+                        name, Integer.valueOf(m.toolNames.size()), Integer.valueOf(tools.size()));
+            } else {
+                log.debug("mcp server {} directory unchanged ({} tool(s)) — 不重发布",
+                        name, Integer.valueOf(tools.size()));
+            }
         } catch (Exception e) {
             // 目录拉不到就把它摘掉: 留着上一次的目录等于广告调不动的工具
             detach(m, "unreachable");
@@ -144,10 +167,32 @@ public class ExternalServerManager {
         }
     }
 
-    private void publish(Managed m, McpProperties.ServerConfig config, List<McpToolDto> tools) {
+    /**
+     * 把上游目录搬进本地注册表.
+     *
+     * @return 这一次是否真的动了目录(逐字未变时返回 false, 于是也不惊动任何会话)
+     */
+    private boolean publish(Managed m, McpProperties.ServerConfig config, List<McpToolDto> tools) {
+        String signature = signatureOf(tools);
+        if (signature.equals(m.publishedSignature) && stillRegistered(m)) {
+            //  重抄一遍同样的目录会 fire 两次变更(摘一次、登一次), 而每条会话都会因此收到
+            //  notifications/tools/list_changed 并去重取 tools/list —— 250 上实测每轮 8 帧.
+            return false;
+        }
+        m.publishedSignature = signature;
         dropTools(m);
         final McpRemoteClient client = m.client;
+        final String self = properties.getServerName();
+        List<McpToolDto> accepted = new ArrayList<McpToolDto>();
+        int echoed = 0;
         for (final McpToolDto tool : tools) {
+            // 环检测: 上游把**我这台**广告出去的工具抄回来还给我了. 收下它不会报错, 只会每轮多一代
+            // 前缀名(撞名分支给它 invent 一个 server__x 的新名字), 于是目录无界增长.
+            // 判据是来源链而不是名字: 链由每一跳在广告时追加自己的 server-name, 所以环上一定有自己.
+            if (self != null && tool.getOrigins() != null && tool.getOrigins().contains(self)) {
+                echoed++;
+                continue;
+            }
             String remoteName = tool.getName();
             String effective = registry.tool(remoteName)
                     .title(tool.getTitle())
@@ -156,6 +201,7 @@ public class ExternalServerManager {
                     .inputSchema(tool.getInputSchemaJson())
                     .outputSchema(tool.getOutputSchemaJson())
                     .annotations(tool.getAnnotations())
+                    .origins(tool.getOrigins())
                     .register(new McpRegistry.ToolExecutor() {
                         @Override
                         public Object execute(Map<String, Object> arguments) throws Exception {
@@ -163,9 +209,42 @@ public class ExternalServerManager {
                         }
                     });
             m.toolNames.add(effective);
+            accepted.add(tool);
+        }
+        if (echoed > 0) {
+            log.warn("mcp server {} returned {} tool(s) that this server ({}) itself advertised;"
+                    + " 聚合已成环, 这些条目不再收 (z-mcp/origins)",
+                    config.getName(), Integer.valueOf(echoed), self);
         }
         registry.registerServer(new McpServerDto(config.getName(), displayEndpoint(config),
-                config.getTransport(), tools));
+                config.getTransport(), accepted));
+        return true;
+    }
+
+    /**
+     * 上游目录的内容签名: 只取会进目录、会被人看见的字段, 并按名字排序 ——
+     * 上游把同一批工具换个顺序回来, 不该被当成变更.
+     */
+    private static String signatureOf(List<McpToolDto> tools) {
+        Set<String> lines = new TreeSet<String>();
+        for (McpToolDto t : tools) {
+            lines.add(t.getName() + '|' + t.getTitle() + '|' + t.getDescription() + '|'
+                    + t.getInputSchemaJson() + '|' + t.getOutputSchemaJson() + '|'
+                    + (t.getAnnotations() == null ? "" : t.getAnnotations().toWire()) + '|'
+                    // 来源链也进签名: 链变了(哪怕内容没变)收与不收的判定就变了
+                    + (t.getOrigins() == null ? "" : t.getOrigins()));
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String line : lines) sb.append(line).append('\n');
+        return sb.toString();
+    }
+
+    /** 上一轮登记的那些条目还在不在 —— 被人直接 unregister 过就不能跳过重发布. */
+    private boolean stillRegistered(Managed m) {
+        for (String n : m.toolNames) {
+            if (!registry.hasTool(n)) return false;
+        }
+        return true;
     }
 
     /** 上游调用: 会话失效由 client 自愈; 网络/协议失败转成执行错误让模型看得见. */
@@ -188,6 +267,8 @@ public class ExternalServerManager {
 
     private void detach(Managed m, String reason) {
         dropTools(m);
+        //  条目已经不在目录里了, 签名也就作废: 否则"摘除后上游原样回来"会被当成没变更而不重发布.
+        m.publishedSignature = null;
         if (m.client != null) {
             try {
                 m.client.disconnect();
@@ -296,6 +377,8 @@ public class ExternalServerManager {
         McpRemoteClient client;
         volatile String lastError;
         volatile long lastSyncMillis;
+        /** 上一次发布出去的上游目录内容, 用来判断这一轮要不要真的动目录. */
+        String publishedSignature;
 
         Managed(String serverName) { this.serverName = serverName; }
     }

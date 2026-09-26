@@ -13,6 +13,7 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.junit4.SpringRunner;
 
@@ -183,6 +184,8 @@ public class ZMcpSseKeepAliveTest {
     private String handshake() {
         HttpHeaders headers = new HttpHeaders();
         headers.set("Accept", BOTH);
+        // 不写这行的话 RestTemplate 会给 String 体补一个 text/plain;charset=UTF-8 ⇒ 415
+        headers.setContentType(MediaType.APPLICATION_JSON);
         ResponseEntity<String> res = rest.exchange("http://127.0.0.1:" + port + "/mcp", HttpMethod.POST,
                 new HttpEntity<>("{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":"
                         + "{\"protocolVersion\":\"" + VERSION + "\",\"capabilities\":{},"
@@ -194,6 +197,7 @@ public class ZMcpSseKeepAliveTest {
 
         HttpHeaders ack = new HttpHeaders();
         ack.set("Accept", BOTH);
+        ack.setContentType(MediaType.APPLICATION_JSON);
         ack.set(SESSION, id);
         ack.set(PROTOCOL, VERSION);
         ResponseEntity<String> notified = rest.exchange("http://127.0.0.1:" + port + "/mcp", HttpMethod.POST,

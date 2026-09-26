@@ -93,6 +93,7 @@ public class McpRegistry {
         private String inputSchemaJson;
         private String outputSchemaJson;
         private ToolAnnotations annotations;
+        private java.util.List<String> origins;
 
         private Builder(String name) { this.name = name; }
 
@@ -108,6 +109,12 @@ public class McpRegistry {
         public Builder outputSchema(String json) { this.outputSchemaJson = json; return this; }
 
         public Builder annotations(ToolAnnotations a) { this.annotations = a; return this; }
+
+        /**
+         * 聚合来源链. 只有 {@link com.zifang.z.mcp.core.client.ExternalServerManager} 该用它:
+         * 传的是上游广告出来的那条链(不含本机), 广告时由协议层补上本机名字.
+         */
+        public Builder origins(java.util.List<String> o) { this.origins = o; return this; }
 
         /**
          * @return 生效工具名(与内置工具重名的外部工具会带命名空间前缀)
@@ -133,7 +140,7 @@ public class McpRegistry {
                     }
                 }
                 tools.put(effective, new ToolEntry(effective, title, description, serverName,
-                        inputSchemaJson, outputSchemaJson, annotations, executor));
+                        inputSchemaJson, outputSchemaJson, annotations, executor, origins));
             }
             fireChanged(Change.TOOLS);
             return effective;
@@ -429,15 +436,24 @@ public class McpRegistry {
         public final String outputSchemaJson;
         public final ToolAnnotations annotations;
         public final ToolExecutor executor;
+        /** 聚合来源链(不含本机); 内置工具为 null. 见 {@link McpToolDto#getOrigins()}. */
+        public final java.util.List<String> origins;
 
         public ToolEntry(String name, String description, String serverName, String schemaJson,
                          ToolExecutor executor) {
-            this(name, null, description, serverName, schemaJson, null, null, executor);
+            this(name, null, description, serverName, schemaJson, null, null, executor, null);
         }
 
         public ToolEntry(String name, String title, String description, String serverName,
                          String schemaJson, String outputSchemaJson, ToolAnnotations annotations,
                          ToolExecutor executor) {
+            this(name, title, description, serverName, schemaJson, outputSchemaJson, annotations,
+                    executor, null);
+        }
+
+        public ToolEntry(String name, String title, String description, String serverName,
+                         String schemaJson, String outputSchemaJson, ToolAnnotations annotations,
+                         ToolExecutor executor, java.util.List<String> origins) {
             this.name = name;
             this.title = title;
             this.description = description;
@@ -446,11 +462,12 @@ public class McpRegistry {
             this.outputSchemaJson = outputSchemaJson;
             this.annotations = annotations;
             this.executor = executor;
+            this.origins = origins;
         }
 
         public McpToolDto toDto() {
             return new McpToolDto(name, title, description, serverName, schemaJson,
-                    outputSchemaJson, annotations);
+                    outputSchemaJson, annotations, origins);
         }
 
         public boolean isBuiltin() { return serverName == null; }

@@ -19,7 +19,11 @@ import java.util.concurrent.ConcurrentHashMap;
  * </ol>
  *
  * <p>鉴权(OAuth 2.1 resource server)是 SHOULD 而非 MUST; 这里提供 bearer 白名单作为
- * 内网场景的最低门槛, 显式留了 {@code WWW-Authenticate} 出口给后续接授权服务器.
+ * 内网场景的最低门槛。401 一律带 {@code WWW-Authenticate}(RFC 6750 §3.1 的三种形状:
+ * 裸挑战 / {@code error=invalid_request} / {@code error=invalid_token})。
+ * 挑战里<b>不</b>写 {@code resource_metadata="..."}: 那要求服务方能真的端出
+ * {@code /.well-known/oauth-protected-resource} 文档, 而静态令牌白名单没有授权服务器可指,
+ * 指出去就是一个 404 的广告.
  */
 public class TransportSecurityGuard {
 
@@ -100,10 +104,23 @@ public class TransportSecurityGuard {
 
         List<String> tokens = sec.getBearerTokens();
         if (!tokens.isEmpty()) {
+            // WWW-Authenticate 的三种形状不是装饰: 客户端按它决定下一步 ——
+            // 裸挑战=去取凭证, invalid_token=凭证被拒(可换新令牌重来),
+            // invalid_request=请求本身不成形(重试无意义)。一律报 invalid_request
+            // 会让"配了 token 但配错"的客户端以为是自己姿势不对而无限重试。
+            String challenge = "Bearer realm=\"z-mcp\"";
+            if (authorization == null) {
+                return new Violation(401, "missing bearer token", challenge);
+            }
             String token = bearerOf(authorization);
-            if (token == null || !tokens.contains(token)) {
-                return new Violation(401, "missing or invalid bearer token",
-                        "Bearer realm=\"z-mcp\", error=\"invalid_request\"");
+            if (token == null) {
+                return new Violation(401,
+                        "malformed Authorization header, expected \"Authorization: Bearer <token>\"",
+                        challenge + ", error=\"invalid_request\"");
+            }
+            if (!tokens.contains(token)) {
+                return new Violation(401, "invalid bearer token",
+                        challenge + ", error=\"invalid_token\"");
             }
         }
         return null;
@@ -148,6 +165,8 @@ public class TransportSecurityGuard {
 
     static String bearerOf(String authorization) {
         if (authorization == null) return null;
+        // trim 之后 "Bearer " 恰好 7 字符, 所以长度不够就等于"只有方案名、没有令牌值" ——
+        // 空值走不到 substring 那一步, 不需要额外的 isEmpty 判断(加了会变成到不了的分支).
         String a = authorization.trim();
         if (a.length() < 7 || !a.regionMatches(true, 0, "Bearer ", 0, 7)) return null;
         return a.substring(7).trim();

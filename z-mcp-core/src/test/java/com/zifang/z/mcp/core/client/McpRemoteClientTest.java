@@ -218,10 +218,56 @@ public class McpRemoteClientTest {
             fail("鉴权失败必须抛出");
         } catch (McpRemoteClient.RemoteRejectException e) {
             assertEquals(401, e.httpStatus());
-            assertTrue(e.getMessage(), e.getMessage().contains("headers"));
+            assertTrue(e.getMessage(), e.getMessage().contains("no credential is configured"));
         }
         // 关键: 401 后再握手只会再拿一个 401, 所以绝不能重握手
         assertEquals(3, script.bodies.size());
+    }
+
+    /**
+     * 同一个 401 有两种成因, 要改的地方在两台不同的机器上: 我们这边根本没把凭证发出去
+     * (改 hub 的 {@code servers[].headers}), 和发了但对方白名单里没有它(改叶子的
+     * {@code bearer-tokens}). 消息里只写状态码的话, 运维只能两边来回猜.
+     */
+    @Test
+    public void a_401_names_the_credential_we_actually_sent() throws Exception {
+        // 部署最常见的踩法: 配置写的是 "Bearer ${VAR}" 而 VAR 没给值 ⇒ 头里只剩方案名.
+        Map<String, String> hdrs = new LinkedHashMap<String, String>();
+        hdrs.put("WWW-Authenticate", "Bearer realm=\"z-mcp\", error=\"invalid_request\"");
+        String empty = messageOf(client(new Script().handshake("s")
+                .answer(401, "application/json", "", hdrs), config("Authorization", "Bearer ")));
+        assertTrue(empty, empty.contains("has a \"Bearer \" prefix but no token value"));
+        assertTrue(empty, empty.contains("error=\"invalid_request\""));
+
+        // 对照: 带了一个像样的令牌被拒 ⇒ 成因换成"对方不认", 且消息里不许出现令牌本身.
+        String rejected = messageOf(client(new Script().handshake("s")
+                .answer(401, "application/json", "", hdrs),
+                config("Authorization", "Bearer s3cr3t-token-value")));
+        assertTrue(rejected, rejected.contains("does not accept"));
+        assertFalse("凭证值不进异常消息: " + rejected, rejected.contains("s3cr3t-token-value"));
+    }
+
+    @Test
+    public void a_non_bearer_authorization_header_is_reported_as_the_wrong_shape_it_is()
+            throws Exception {
+        // 有人会把网关要的 "ApiKey xxx" 填进来: 这时该说的是"写法不对", 而不是"令牌被拒".
+        String msg = messageOf(client(new Script().handshake("s")
+                        .answer(403, "text/plain", "", null),
+                config("Authorization", "ApiKey s3cr3t-token-value")));
+        assertTrue(msg, msg.contains("not of the form \"Bearer <token>\""));
+        assertTrue(msg, msg.contains("HTTP 403"));
+    }
+
+    private static String messageOf(McpRemoteClient c) {
+        try {
+            c.connect();
+            c.listTools();
+        } catch (McpRemoteClient.RemoteRejectException e) {
+            return e.getMessage();
+        } catch (IOException e) {
+            throw new AssertionError(e);
+        }
+        throw new AssertionError("期望被拒却没有被拒");
     }
 
     @Test

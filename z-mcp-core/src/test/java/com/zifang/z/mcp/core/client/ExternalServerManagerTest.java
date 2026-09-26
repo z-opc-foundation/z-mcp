@@ -120,6 +120,16 @@ public class ExternalServerManagerTest {
         e.enqueue(new JsonRpcExchange.Response(202, null, "", h));
     }
 
+    /** 同 {@link #handshake}, 但对面的 {@code serverInfo.name} 由调用方给 —— 自指判据就落在这一个字段上. */
+    private static void handshakeAs(FakeExchange e, String sid, String advertisedName) {
+        Map<String, String> h = new LinkedHashMap<String, String>();
+        if (sid != null) h.put("Mcp-Session-Id", sid);
+        e.enqueue(new JsonRpcExchange.Response(200, "application/json",
+                "{\"jsonrpc\":\"2.0\",\"result\":{\"protocolVersion\":\"2025-06-18\","
+                        + "\"serverInfo\":{\"name\":\"" + advertisedName + "\",\"version\":\"1\"}}}", h));
+        e.enqueue(new JsonRpcExchange.Response(202, null, "", h));
+    }
+
     private static void toolsPage(FakeExchange e, String toolsJson) {
         e.enqueue(new JsonRpcExchange.Response(200, "application/json",
                 "{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":" + toolsJson
@@ -454,5 +464,147 @@ public class ExternalServerManagerTest {
             assertTrue(transport, exchange instanceof HttpJsonRpcExchange);
             exchange.close();
         }
+    }
+
+    /**
+     * 自指的上游: hub 指向"另一台 hub", 而那台其实就是自己(或自己的复制品)时, 对岸的目录里
+     * 装的是我这台目录的副本 —— 每同步一轮就往目录里加一代, 实测十分钟从 150 涨到 228.
+     *
+     * <p>判据取握手回来的 {@code serverInfo.name}: 它比 endpoint 可靠(hub 换端口指向自己、
+     * 或两台同配置的复制品互为上游, 都是同一个名). 负向断言带阳性对照: 名字不同的那台照常聚合,
+     * 这样"一个自指上游"不会顺带把整张目录清空.
+     */
+    @Test
+    public void an_upstream_that_advertises_this_servers_own_name_is_refused() throws Exception {
+        Fixture f = new Fixture();
+        f.properties.setServerName("z-mcp");
+        f.server("twin");
+        FakeExchange twinUp = f.upstream("twin");
+        handshakeAs(twinUp, "s1", "z-mcp");
+        //  这条目录就是猎物: 没有闸时它会被整份抄进目录. 不给这一页的话"没聚合"会因为
+        //  "脚本答完"而成立, 那条负向断言就是空跑的.
+        toolsPage(twinUp, "[{\"name\":\"echo\"},{\"name\":\"find_tools\"}]");
+        f.server("acme");
+        FakeExchange acme = f.upstream("acme");
+        handshakeAs(acme, "s2", "acme-hub");
+        toolsPage(acme, "[{\"name\":\"lookup\"}]");
+
+        f.manager.syncAll();
+
+        Map<String, Object> twin = state(f, "twin");
+        Map<String, Object> other = state(f, "acme");
+        assertEquals("自指的那台一条工具都不许进目录", 0, num(twin, "toolCount"));
+        assertEquals("只有 acme 的 1 条留在目录里", 1, f.registry.toolCount());
+        assertEquals(1, num(other, "toolCount"));
+        assertTrue("拒绝要在 lastError 里说清是谁自指, 不能静悄悄",
+                String.valueOf(twin.get("lastError")).contains("identifies itself as this server"));
+        assertEquals("自指的那台算 failed", 1, num(f.manager.health(), "failed"));
+    }
+
+    /**
+     * 健康检查每轮都会把每条上游的目录重拉一遍 —— 上游没变时这一趟**不该**惊动任何会话.
+     *
+     * <p>这一条是 250 上量出来的: 一条什么都不做的流在 80 秒里收到 24 帧
+     * {@code notifications/tools/list_changed}(每轮 8 帧 = 两条上游 ×(摘 2 + 登 2) 次 fire),
+     * 而按协议收到该通知的客户端会立刻重取 {@code tools/list} —— 服务端在自己制造负载.
+     */
+    @Test
+    public void an_unchanged_upstream_directory_does_not_re_announce_itself() throws Exception {
+        Fixture f = new Fixture();
+        final int[] fires = new int[1];
+        f.registry.addChangeListener(McpRegistry.Change.TOOLS, new Runnable() {
+            @Override public void run() { fires[0]++; }
+        });
+        f.server("acme");
+        FakeExchange acme = f.upstream("acme");
+        handshake(acme, "s1");
+        String page = "[{\"name\":\"lookup\"},{\"name\":\"fetch\"}]";
+        toolsPage(acme, page);
+        toolsPage(acme, page);
+
+        f.manager.syncAll();
+        int afterFirst = fires[0];
+        assertTrue("第一轮必须真有变更可播, 否则下面的负向断言是空跑的: fires=" + afterFirst,
+                afterFirst > 0);
+        assertEquals(2, f.registry.toolCount());
+
+        f.manager.syncAll();
+        assertEquals("目录逐字未变, 不该多播一次", afterFirst, fires[0]);
+        assertEquals(2, f.registry.toolCount());
+
+        toolsPage(acme, "[{\"name\":\"lookup\"},{\"name\":\"fetch\"},{\"name\":\"extra\"}]");
+        f.manager.syncAll();
+        assertEquals("真加了工具就要进目录", 3, f.registry.toolCount());
+        assertTrue("而且必须播", fires[0] > afterFirst);
+    }
+
+    private static Map<String, Object> state(Fixture f, String name) {
+        for (Map<String, Object> s : f.manager.state()) {
+            if (name.equals(s.get("name"))) return s;
+        }
+        fail("状态里没有 " + name + ": " + f.manager.state());
+        return null;
+    }
+
+    /**
+     * 两台**不同名**的 hub 互为上游时, 目录必须停在第一轮的大小.
+     *
+     * <p>上面那条自指判据只认得"对岸报的名就是我"; 而 hub-a 指 hub-b、hub-b 指 hub-a 这种形状里
+     * 两边都看不见自己: b 把 a 的工具抄过去、撞上 b 自己的同名工具就冠上 {@code a__} 前缀,
+     * a 下一轮再把那批复制品当新工具收下 —— 每同步一轮多一代前缀名.
+     *
+     * <p>判据换成分布式的: 每一跳在 {@code tools/list} 广告时把自己的 server-name 追加到
+     * {@code _meta["z-mcp/origins"]} 链尾, 所以"被我抄出去又绕回来"的那条, 链上一定带着我.
+     * 阳性对照是同页里对岸自己的那条 —— 不能为了断环把正常工具也拒了.
+     */
+    @Test
+    public void tools_the_upstream_copied_from_us_are_not_copied_back() throws Exception {
+        Fixture f = new Fixture();
+        f.properties.setServerName("hub-a");
+        f.server("mirror");
+        FakeExchange mirror = f.upstream("mirror");
+        handshakeAs(mirror, "s1", "hub-b");
+        String page = "[{"
+                + "\"name\":\"b_own\",\"description\":\"对岸自己的工具\","
+                + "\"inputSchema\":{\"type\":\"object\"},"
+                + "\"_meta\":{\"z-mcp/server\":\"a\",\"z-mcp/origins\":\"hub-b\"}"
+                + "},{"
+                + "\"name\":\"hub-a__echo\",\"description\":\"我的 echo 被抄过去又抄回来\","
+                + "\"inputSchema\":{\"type\":\"object\"},"
+                + "\"_meta\":{\"z-mcp/server\":\"a\",\"z-mcp/origins\":\"hub-a,hub-b\"}"
+                + "}]";
+        toolsPage(mirror, page);
+
+        f.manager.syncAll();
+
+        assertTrue("对岸自己的工具照常进目录(阳性对照)", f.registry.hasTool("b_own"));
+        assertFalse("链上有自己的那条不许再收", f.registry.hasTool("hub-a__echo"));
+        assertEquals(1, f.registry.toolCount());
+        assertEquals("该 server 的计数按收进来的算", 1, num(state(f, "mirror"), "toolCount"));
+        assertNull("拒收成环的复制品不是故障, 不该记成 lastError",
+                state(f, "mirror").get("lastError"));
+        assertEquals("存下来的链不含本机(广告时才追加自己)",
+                java.util.Collections.singletonList("hub-b"), f.registry.lookup("b_own").origins);
+
+        toolsPage(f.exchange("mirror"), page);
+        f.manager.syncAll();
+        assertEquals("下一轮同样的东西再来, 目录不许长", 1, f.registry.toolCount());
+    }
+
+    /**
+     * 链只对**会带 {@code _meta} 的上游**成立. 第三方 hub 会把我们的 {@code _meta} 原样丢掉,
+     * 于是它抄回来的那条没有链 —— 这一条钉住"没有链就照常收", 免得把判据写成"没链的一律拒",
+     * 那会让所有第三方上游的工具全部消失.
+     */
+    @Test
+    public void an_upstream_that_sends_no_provenance_chain_is_still_aggregated() throws Exception {
+        Fixture f = new Fixture();
+        f.properties.setServerName("hub-a");
+        f.server("foreign");
+        publish(f, "foreign", "[{\"name\":\"their_tool\",\"description\":\"没有 _meta\"}]");
+        f.manager.syncAll();
+        assertTrue(f.registry.hasTool("their_tool"));
+        assertNull("不带链的条目存下来就是没有链", f.registry.lookup("their_tool").origins);
+        assertEquals(1, f.registry.toolCount());
     }
 }

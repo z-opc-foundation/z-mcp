@@ -111,6 +111,31 @@ public class ZMcpHttpEndpointTest {
                 res.getBody().contains(SESSION));
     }
 
+    /**
+     * 415 这一维要有真容器那层: 单测里的 Content-Type 是我们自己塞进 MockHttpServletRequest 的,
+     * 只有走过 servlet 栈才知道客户端实际送出的那个头判不判得掉.
+     *
+     * <p>四格是两对对照, 每对只差 Content-Type:
+     * ① {@code initialize} 是本来会 200 的一条(它不需要会话), 换 text/plain 变 415 ⇒ 闸长在
+     * 会话闸之前, 而且握手那一步也不例外; ② {@code tools/list} 缺会话 id 本来就该 400,
+     * 换 text/plain 读出 415 ⇒ 两道闸都活着且顺序对. 只测 415 的话"永远 415"也能过.
+     */
+    @Test
+    public void non_json_content_type_is_refused_by_the_real_container() {
+        ResponseEntity<String> plainInit = postWithContentType("text/plain", initialize(11));
+        assertEquals(HttpStatus.UNSUPPORTED_MEDIA_TYPE, plainInit.getStatusCode());
+        assertTrue("415 要指出该带什么: " + plainInit.getBody(),
+                plainInit.getBody().contains("application/json"));
+        assertEquals("同一形体 application/json 必须仍然 200(否则这道闸是在挡客户端正常用法)",
+                HttpStatus.OK, postWithContentType("application/json", initialize(12)).getStatusCode());
+
+        String listNoSession = request(13, "tools/list", "{}");
+        assertEquals(HttpStatus.BAD_REQUEST,
+                postWithContentType("application/json", listNoSession).getStatusCode());
+        assertEquals(HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+                postWithContentType("text/plain", listNoSession).getStatusCode());
+    }
+
     @Test
     public void a_session_the_server_does_not_know_is_a_404_so_the_client_reinitializes() {
         ResponseEntity<String> res = post(MCP, request(4, "tools/list", "{}"), BOTH,
@@ -233,6 +258,15 @@ public class ZMcpHttpEndpointTest {
     private static String request(int id, String method, String params) {
         return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":\"" + method + "\","
                 + "\"params\":" + params + "}";
+    }
+
+    /** 只换 Content-Type、其余照旧的一条 POST —— 415 那格要的就是"别的都不变". */
+    private ResponseEntity<String> postWithContentType(String contentType, String body) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(HttpHeaders.ACCEPT, BOTH);
+        headers.setContentType(MediaType.parseMediaType(contentType));
+        return rest.exchange("http://127.0.0.1:" + port + MCP, HttpMethod.POST,
+                new HttpEntity<String>(body, headers), String.class);
     }
 
     private ResponseEntity<String> post(String path, String body, String accept,

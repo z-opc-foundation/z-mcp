@@ -1,0 +1,23 @@
+# 角色 hub: 服务中心. 把内网其它 MCP server 的工具聚合进同一张目录, 对外只有一个 /mcp.
+#
+# 上游的存活与目录由 ExternalServerManager 周期性核对(周期见 z.mcp.health-check-interval-seconds):
+# 拉不到 tools/list 的上游会被**摘掉**工具并记下 lastError, 因为广告一条调不动的工具比不广告更糟.
+
+z:
+  mcp:
+    server-name: z-mcp
+    server-title: z-opc MCP 服务中心
+    instructions: >-
+      这里是 z-opc 的 MCP 服务中心: 目录里的工具一部分由本机提供, 一部分从内网其它 MCP server 聚合而来.
+      不确定该用哪条工具时先用 find_tools 检索; 想知道某条工具的上游在不在线, 用 registry_state 看真实连接状态.
+    servers:
+      - name: text
+        transport: http
+        endpoint: ${Z_MCP_TEXT_ENDPOINT:http://127.0.0.1:18096/mcp}
+        headers:
+          Authorization: "Bearer ${Z_MCP_UPSTREAM_TOKEN:}"
+      - name: codec
+        transport: http
+        endpoint: ${Z_MCP_CODEC_ENDPOINT:http://127.0.0.1:18097/mcp}
+        headers:
+          Authorization: "Bearer ${Z_MCP_UPSTREAM_TOKEN:}"

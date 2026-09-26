@@ -1,0 +1,12 @@
+# 角色 codec: 编码/摘要叶子服务. 只登记自己的工具, 不聚合任何上游.
+
+server:
+  port: ${Z_MCP_PORT:18097}
+
+z:
+  mcp:
+    server-name: z-mcp-codec
+    server-title: 编码与摘要服务
+    builtin-tools-enabled: false
+    instructions: >-
+      Base64 互转与摘要计算(十六进制), 纯计算; md5 与 sha-1 只作校验和, 不具备抗碰撞性.

@@ -1,5 +1,9 @@
 package com.zifang.z.mcp.api.dto;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
 /**
  * MCP 工具注册条目(API 层 DTO).
  *
@@ -19,12 +23,24 @@ public final class McpToolDto {
     private final String outputSchemaJson;
     private final ToolAnnotations annotations;
 
+    /**
+     * 聚合来源链: 这个工具依次经过哪些 server (取各家的 serverInfo.name), 由最近一跳标出.
+     * 只用于断环 —— 链上有自己就不再导入. 内置工具为 null.
+     */
+    private final List<String> origins;
+
     public McpToolDto(String name, String description, String serverName, String inputSchemaJson) {
         this(name, null, description, serverName, inputSchemaJson, null, null);
     }
 
     public McpToolDto(String name, String title, String description, String serverName,
                       String inputSchemaJson, String outputSchemaJson, ToolAnnotations annotations) {
+        this(name, title, description, serverName, inputSchemaJson, outputSchemaJson, annotations, null);
+    }
+
+    public McpToolDto(String name, String title, String description, String serverName,
+                      String inputSchemaJson, String outputSchemaJson, ToolAnnotations annotations,
+                      List<String> origins) {
         this.name = name;
         this.title = title;
         this.description = description;
@@ -32,6 +48,8 @@ public final class McpToolDto {
         this.inputSchemaJson = inputSchemaJson;
         this.outputSchemaJson = outputSchemaJson;
         this.annotations = annotations;
+        this.origins = origins == null || origins.isEmpty()
+                ? null : Collections.unmodifiableList(new ArrayList<String>(origins));
     }
 
     public String getName() { return name; }
@@ -60,4 +78,10 @@ public final class McpToolDto {
     public String getOutputSchemaJson() { return outputSchemaJson; }
 
     public ToolAnnotations getAnnotations() { return annotations; }
+
+    /**
+     * 聚合来源链: 把这条工具广告出来的每一跳的 server-name, 按"离自己越近越靠后"排列.
+     * 内置工具与不支持该字段的第三方上游返回 null.
+     */
+    public List<String> getOrigins() { return origins; }
 }

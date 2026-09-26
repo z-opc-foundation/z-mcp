@@ -316,12 +316,27 @@ public class McpProtocolHandler {
             Map<String, Object> aw = ann.toWire();
             if (!aw.isEmpty()) entry.put("annotations", aw);
         }
-        if (!t.isBuiltin()) {
-            Map<String, Object> meta = new LinkedHashMap<String, Object>();
-            meta.put("z-mcp/server", t.getServerName());
-            entry.put("_meta", meta);
-        }
+        Map<String, Object> meta = new LinkedHashMap<String, Object>();
+        if (!t.isBuiltin()) meta.put("z-mcp/server", t.getServerName());
+        // 广告出去时把本机追加在链尾: 下一跳若把这条工具再抄回来, 链上就带着它自己, 于是能被拒.
+        List<String> trail = new ArrayList<String>();
+        if (t.getOrigins() != null) trail.addAll(t.getOrigins());
+        String self = properties.getServerName();
+        if (self != null && !self.isEmpty() && !trail.contains(self)) trail.add(self);
+        if (!trail.isEmpty()) meta.put("z-mcp/origins", joinOrigins(trail));
+        entry.put("_meta", meta);
         return entry;
+    }
+
+    /** 来源链的线格式: 逗号分隔的 server-name, 越近的一跳越靠后. */
+    static String joinOrigins(List<String> trail) {
+        StringBuilder sb = new StringBuilder();
+        for (String s : trail) {
+            if (s == null || s.isEmpty()) continue;
+            if (sb.length() > 0) sb.append(',');
+            sb.append(s);
+        }
+        return sb.toString();
     }
 
     private JsonNode parseSchema(String json, String toolName, String which) {

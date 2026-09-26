@@ -104,10 +104,19 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
 
       - name: mvn deploy -Pcentral
-        # revision 经 env 传进来再引用, 不让标签里的字符参与命令行拼接.
-        run: mvn -B -ntp deploy -Pcentral -DskipTests -Drevision="$REVISION"
+        # -pl 是白名单而不是可选优化: 根 pom 的 central profile 把 source/javadoc/gpg/central-publishing
+        # 注进**每一个**模块, 不带 -pl 就等于"凡是在 <modules> 里的东西自动上中央仓库".
+        # z-mcp-server 是一枚可执行进程, 它的坐标占位是永久的且没人会 import 它 —— 所以新增模块默认
+        # 不在名单里, 要对外发布必须显式加进来.
+        # 不用 maven.deploy.skip 兜这个: 它对 central-publishing 的上传不生效(兄弟仓实测),
+        # 写了属性却没真的跳过是最难查的那种"发布成功".
+        #
+        # -am 会把聚合根 pom 一起 deploy: 消费者解析这四件时要先拿父 pom,
+        # 漏发父 pom 会让已发布的 .pom 里的 <parent> 悬空(z-cache/mq/gw/vector 撞过).
+        run: mvn -B -ntp deploy -Pcentral -DskipTests -Drevision="$REVISION" -pl "$PUBLISHED_MODULES" -am
         env:
           REVISION: ${{ steps.rev.outputs.revision }}
+          PUBLISHED_MODULES: z-mcp-api,z-mcp-core,z-mcp-starter,z-mcp-admin
 
       - name: Verify deployment
         if: success()

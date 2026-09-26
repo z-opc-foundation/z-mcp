@@ -45,6 +45,18 @@ public class McpProperties {
     /** 工具名是否强制 [A-Za-z0-9_.-]{1,128}. */
     private boolean strictToolNames = true;
 
+    /**
+     * 是否注册内置工具(echo / get_time / generate_uuid / system_info)与三条自省资源.
+     *
+     * <p>{@code z-mcp-server} 的叶子服务这一项要关: 一个只提供编解码工具的服务被聚合进 hub 之后,
+     * 它的 {@code echo} 会撞上 hub 自己的 {@code echo} 而变成 {@code codec__echo} ——
+     * 目录里躺着四份"回显输入文本", 客户端只会挑到错的那一份.
+     *
+     * <p>关掉之后 {@code resources/list} 是空表(不是错误): 那三条资源描述的是注册中心自己,
+     * 叶子服务没有中心可描述.
+     */
+    private boolean builtinToolsEnabled = true;
+
     /** list 类方法每页条数, 0 = 不分页(一次给全). */
     private int pageSize = 0;
 
@@ -89,6 +101,9 @@ public class McpProperties {
 
     public boolean isStrictToolNames() { return strictToolNames; }
     public void setStrictToolNames(boolean b) { this.strictToolNames = b; }
+
+    public boolean isBuiltinToolsEnabled() { return builtinToolsEnabled; }
+    public void setBuiltinToolsEnabled(boolean b) { this.builtinToolsEnabled = b; }
 
     public int getPageSize() { return pageSize; }
     public void setPageSize(int n) { this.pageSize = n; }

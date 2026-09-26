@@ -88,10 +88,12 @@ public class ZMcpAdminAuthTest {
         // 这里不能用 TestRestTemplate: JDK 的 HttpURLConnection 把 Origin 列为受限请求头,
         // 客户端会把它静默丢掉 —— 第一版就是这么读到"200, 闸没生效"的. 裸 socket 才是那把尺.
         assertEquals("带凭证的跨站请求必须被同源策略挡下",
-                HttpStatus.FORBIDDEN.value(), rawStatus("Origin: http://evil.example",
+                HttpStatus.FORBIDDEN.value(), rawStatus("/mcp/admin/overview",
+                        "Origin: http://evil.example",
                         "Authorization: Bearer control-plane-token"));
         assertEquals("同源(与 Host 一致)的读取照常放行",
-                HttpStatus.OK.value(), rawStatus("Origin: http://127.0.0.1:" + port,
+                HttpStatus.OK.value(), rawStatus("/mcp/admin/overview",
+                        "Origin: http://127.0.0.1:" + port,
                         "Authorization: Bearer control-plane-token"));
     }
 
@@ -102,19 +104,65 @@ public class ZMcpAdminAuthTest {
         // "cannot retry due to server authentication, in streaming mode", 那读的是客户端不是闸.
         ResponseEntity<String> data = rest.exchange("http://127.0.0.1:" + port + "/mcp",
                 HttpMethod.DELETE, new HttpEntity<String>(new HttpHeaders()), String.class);
+        ResponseEntity<String> stream = rest.exchange("http://127.0.0.1:" + port + "/mcp",
+                HttpMethod.GET, new HttpEntity<String>(new HttpHeaders()), String.class);
         ResponseEntity<String> control = get("/mcp/admin/overview", null);
         assertEquals("同一个凭证策略下两扇门必须给出同一个答复",
                 data.getStatusCode(), control.getStatusCode());
         assertEquals(HttpStatus.UNAUTHORIZED, data.getStatusCode());
+        assertEquals(HttpStatus.UNAUTHORIZED, stream.getStatusCode());
+
+        // 只比状态码的那一版量不到"头"这一维: 修之前 GET/DELETE 回的是裸 401(没挑战),
+        // 而控制面带挑战 —— 从流那一路进来的客户端因此拿不到"该怎么带凭证"的任何指示.
+        String challenge = control.getHeaders().getFirst(HttpHeaders.WWW_AUTHENTICATE);
+        assertNotNull("401 必须带 WWW-Authenticate(RFC 6750)", challenge);
+        assertEquals("Bearer realm=\"z-mcp\"", challenge);
+        assertEquals("数据面 DELETE 的挑战与控制面不同形",
+                challenge, data.getHeaders().getFirst(HttpHeaders.WWW_AUTHENTICATE));
+        assertEquals("数据面 GET(流)的挑战与控制面不同形",
+                challenge, stream.getHeaders().getFirst(HttpHeaders.WWW_AUTHENTICATE));
+    }
+
+    /**
+     * 自检路径 {@code /mcp/info} 也在同一把闸后面.
+     *
+     * <p>它报工具/资源/会话计数和服务端版本 —— 拓扑指纹, 与刚被收口的控制面同类。0.2.0 那次
+     * 只把闸装到了 {@code z-mcp-admin} 的那组映射上, 而这条方法连 {@code HttpServletRequest}
+     * 都不接, 于是"配了 token 就锁上了"这句话在它身上不成立: 匿名可读、跨站 Origin 也可读,
+     * 而 README 教的恰恰是"探针用 curl 直接读它"。
+     */
+    @Test
+    public void the_liveness_probe_is_behind_the_same_gate() throws Exception {
+        ResponseEntity<String> anon = get("/mcp/info", null);
+        assertEquals("同一个凭证策略下 /mcp/info 不许比另外两扇门松",
+                HttpStatus.UNAUTHORIZED, anon.getStatusCode());
+        assertEquals("挑战形状必须与数据面、控制面同形",
+                "Bearer realm=\"z-mcp\"", anon.getHeaders().getFirst(HttpHeaders.WWW_AUTHENTICATE));
+
+        assertEquals("凭证对了也不等于谁都能读: 跨站 Origin 同样要挡",
+                HttpStatus.FORBIDDEN.value(), rawStatus("/mcp/info",
+                        "Origin: http://evil.example", "Authorization: Bearer control-plane-token"));
+
+        ResponseEntity<String> ok = get("/mcp/info", "Bearer control-plane-token");
+        assertEquals("带对了凭证的自检必须照常可用(否则这条闸是把它整个关死了)",
+                HttpStatus.OK, ok.getStatusCode());
+        JsonNode info = mapper.readTree(ok.getBody());
+        assertTrue("探针报的工具数必须是注册表里的真数: " + ok.getBody(),
+                info.path("tools").asInt() > 0);
     }
 
     /** 不经任何 HTTP client, 直接写一行请求, 只取状态码. */
-    private int rawStatus(String... headers) throws java.io.IOException {
+    private int rawStatus(String path, String... headers) throws java.io.IOException {
+        if (!path.startsWith("/")) {
+            // 第一个参数是路径. 少写一个参数时编译器不会拦(还有 varargs), 于是"Origin: xxx"
+            // 会被当请求路径打出去, 读回来的 400/404 看着像闸生效了 —— 量具自己得先拒绝这种读法.
+            throw new IllegalArgumentException("path must start with '/': " + path);
+        }
         java.net.Socket socket = new java.net.Socket("127.0.0.1", port);
         try {
             socket.setSoTimeout(10_000);
             java.io.OutputStream out = socket.getOutputStream();
-            StringBuilder request = new StringBuilder("GET /mcp/admin/overview HTTP/1.1\r\n")
+            StringBuilder request = new StringBuilder("GET ").append(path).append(" HTTP/1.1\r\n")
                     .append("Host: 127.0.0.1:").append(port).append("\r\n");
             for (String header : headers) request.append(header).append("\r\n");
             request.append("Connection: close\r\n\r\n");

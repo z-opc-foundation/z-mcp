@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.yuku123</groupId>
+        <artifactId>z-mcp</artifactId>
+        <version>${revision}</version>
+    </parent>
+
+    <groupId>io.github.yuku123</groupId>
+    <artifactId>z-mcp-server</artifactId>
+    <version>${revision}</version>
+    <packaging>jar</packaging>
+
+    <name>z-mcp-server</name>
+    <description>可部署的 MCP 进程: 一个 fat jar 按 profile 选角色(hub 聚合 / text / codec), 部署在内网 250 上</description>
+
+    <!--
+        本模块**不发**到 Maven Central: 它是一个可执行进程, 不是一枚给别人 import 的库.
+        中央仓库的坐标永久占位, 发错收不回, 所以拦在流水线而不是靠注释提醒 ——
+        .github/workflows/publish-central.yml 的 deploy 已改成显式 -pl 白名单(只列 api/core/starter/admin),
+        新增模块默认不在名单里. 别把它加回白名单, 也别改成 -pl 排除语法(排除会把"以后新增的模块"默认放进发布集).
+    -->
+
+    <properties>
+        <maven.compiler.source>8</maven.compiler.source>
+        <maven.compiler.target>8</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <start-class>com.zifang.z.mcp.server.ZMcpServerApplication</start-class>
+    </properties>
+
+    <dependencies>
+        <!-- starter 里已经带了 core + api + admin(admin 是装配 @ComponentScan 的真实依赖) -->
+        <dependency>
+            <groupId>io.github.yuku123</groupId>
+            <artifactId>z-mcp-starter</artifactId>
+            <version>${revision}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.junit.vintage</groupId>
+                    <artifactId>junit-vintage-engine</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.vintage</groupId>
+            <artifactId>junit-vintage-engine</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+              交付物是一个进程, 所以这一枚必须是 fat jar: 少了 repackage, `package` 出来的是普通
+              jar(没有 Main-Class, `java -jar` 报"没有主清单属性"), 而单测跑在 package 之前 ——
+              没有任何测试会因为它不在而红. 只有真的 java -jar 起一次才量得到.
+            -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <version>${spring-boot.version}</version>
+                <configuration>
+                    <mainClass>${start-class}</mainClass>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>repackage</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

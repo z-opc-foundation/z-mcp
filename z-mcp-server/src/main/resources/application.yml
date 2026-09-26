@@ -1,0 +1,32 @@
+# z-mcp-server 的公共默认配置. 角色差异在 application-{role}.yml 里, 由 Z_MCP_ROLE 选哪一份.
+#
+# 这一份刻意不含任何口令: bearer-tokens 只从环境变量进配置. 写进版本库的令牌等于公开令牌,
+# 而它是这台机器上所有 MCP 工具调用的通行证.
+
+server:
+  port: ${Z_MCP_PORT:18095}
+
+spring:
+  application:
+    name: z-mcp-server
+  profiles:
+    # 一个 fat jar 装三种角色, 部署时只多给一个变量: Z_MCP_ROLE=hub|text|codec
+    active: ${Z_MCP_ROLE:hub}
+  main:
+    banner-mode: off
+
+z:
+  mcp:
+    enabled: true
+    # 控制面 /mcp/admin/* 与数据面共用同一道 TransportSecurityGuard(0.2.0 收口时补的),
+    # 所以"开了管理面"不等于"管理面对全网开放": 配了 bearer-tokens 它就要令牌.
+    expose-admin: true
+    server-name: z-mcp
+    server-title: z-opc MCP 服务中心
+    health-check-interval-seconds: 30
+    session:
+      ttl-seconds: 3600
+      max-sessions: 200
+    security:
+      # 逗号分隔可给多条(轮换期新旧令牌并存). 不给 = 空列表 = 关闭鉴权, 只在内网可信网段成立.
+      bearer-tokens: ${Z_MCP_BEARER_TOKENS:}

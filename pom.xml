@@ -10,6 +10,7 @@
         - core:    McpRegistry + 协议层(McpProtocolHandler) + Streamable HTTP/stdio 双向传输
         - starter: Spring Boot 自动装配
         - admin:   控制面 (servers/tools/health 视图)
+        - server:  可部署进程(hub / text / codec 三种角色一个 fat jar), 只在 250 上跑, 不发中央仓库
 
         依赖面刻意收在 Spring Boot 2.7 + Jackson + SLF4J:
         - 不用官方 MCP Java SDK —— 它要求 Java 17 + Reactor, 本仓编译目标是 Java 8
@@ -57,6 +58,8 @@
         <module>z-mcp-core</module>
         <module>z-mcp-starter</module>
         <module>z-mcp-admin</module>
+        <!-- 可执行进程: 只在 publish-central.yml 的 -pl 白名单**之外**, 所以不会被发到中央仓库. -->
+        <module>z-mcp-server</module>
     </modules>
 
     <properties>
@@ -90,6 +93,27 @@
                 <configuration>
                     <source>${maven.compiler.source}</source>
                     <target>${maven.compiler.target}</target>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.1</version>
+                <configuration>
+                    <archive>
+                        <!--
+                          ZMcpAutoConfiguration 读的是 ZMcpAutoConfiguration.class 那个包(= z-mcp-starter jar)
+                          的 Implementation-Version, 并声称"配置值只作兜底". 默认情况下 maven-jar-plugin
+                          根本不发这个头 ⇒ 那条判据恒为 null, 线上报的版本永远是 yml 里手抄的那一个(会漂).
+                          写在根 pom 是为了每个模块的 jar 各自报出自己的真实版本.
+                          层级必须是 archive/manifest: 少一层 manifest 的话 jar 插件报
+                          "Cannot find 'addDefaultImplementationEntries' in MavenArchiveConfiguration"
+                          并直接中止构建 —— 只有跑到 package/jar 才看得见, 单测编译期不报.
+                        -->
+                        <manifest>
+                            <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+                        </manifest>
+                    </archive>
                 </configuration>
             </plugin>
             <plugin>

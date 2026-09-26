@@ -170,6 +170,23 @@ public class McpProtocolHandlerTest {
         assertEquals(McpSchema.LATEST_SUPPORTED, r.get("protocolVersion"));
     }
 
+    /**
+     * 兜底值本身必须在支持表里。传输层原先在握手成功后还检查一遍"协商出来的版本支持吗",
+     * 而按 {@link McpSchema#negotiate} 的定义那一支永远为真 —— 于是那条 400 是发不出去的死码,
+     * 谁都碰不到、也没有测试能碰到。把这条不变量挪到能被红的地方钉住: 有人往表里加版本、
+     * 或者把 {@code LATEST_SUPPORTED} 改成表外的值时, 这里红, 而不是线上冒出一个不可能的分支。
+     */
+    @Test
+    public void the_downgrade_target_is_itself_supported() {
+        assertTrue("兜底值必须在自己支持的范围里",
+                McpSchema.SUPPORTED_VERSIONS.contains(McpSchema.LATEST_SUPPORTED));
+        assertTrue(McpSchema.isSupported(McpSchema.negotiate("1999-01-01")));
+        assertTrue(McpSchema.isSupported(McpSchema.negotiate(null)));
+        assertTrue(McpSchema.isSupported(McpSchema.negotiate("2025-11-25")));
+        assertFalse("受支持与否只认表, 不能按字符串比较糊过去",
+                McpSchema.isSupported("2026-07-28"));
+    }
+
     @Test
     public void initialize_without_clientInfo_is_invalid_params() throws Exception {
         McpProtocolHandler.RequestContext ctx = new McpProtocolHandler.RequestContext();
@@ -238,7 +255,36 @@ public class McpProtocolHandlerTest {
         }
         assertNotNull(gh);
         assertEquals("github", ((Map<String, Object>) gh.get("_meta")).get("z-mcp/server"));
-        assertNull(echo.get("_meta"));
+        //  内置工具不再有"整个 _meta 缺席"这个形状: 来源链必须每跳都盖章, 否则对岸抄回来的
+        //  内置工具会没有链可判(见 ExternalServerManagerTest 的断环那条). 但它仍不该被安上出处.
+        Map<String, Object> echoMeta = (Map<String, Object>) echo.get("_meta");
+        assertNotNull(echoMeta);
+        assertNull("内置工具不许被记成某个外部 server 提供的", echoMeta.get("z-mcp/server"));
+        assertEquals("内置工具广告时要带上自己这一跳", "z-mcp", echoMeta.get("z-mcp/origins"));
+    }
+
+    /**
+     * 来源链的广告规则: 注册表里存的是"上游给我的那条链", 广告时把本机追加在末尾;
+     * 链上已经有本机就不许再追加一次(否则每一跳都会把自己抄一遍).
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    public void the_provenance_chain_grows_by_exactly_one_hop_per_server() throws Exception {
+        registry.tool("from_b").description("d").server("b")
+                .origins(java.util.Arrays.asList("hub-b"))
+                .register(args -> "ok");
+        registry.tool("already_mine").description("d").server("b")
+                .origins(java.util.Arrays.asList("hub-b", "z-mcp"))
+                .register(args -> "ok");
+        Map<String, Object> r = resultOf(handler.handle(call("tools/list", null, "31"), liveSession()));
+        java.util.List<Map<String, Object>> tools = (java.util.List<Map<String, Object>>) r.get("tools");
+        Map<String, String> chains = new java.util.LinkedHashMap<String, String>();
+        for (Map<String, Object> t : tools) {
+            Map<String, Object> meta = (Map<String, Object>) t.get("_meta");
+            if (meta != null) chains.put((String) t.get("name"), (String) meta.get("z-mcp/origins"));
+        }
+        assertEquals("对岸的链后面必须接上本机", "hub-b,z-mcp", chains.get("from_b"));
+        assertEquals("链上已有本机时不许重复追加", "hub-b,z-mcp", chains.get("already_mine"));
     }
 
     @Test

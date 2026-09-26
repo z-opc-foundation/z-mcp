@@ -190,8 +190,9 @@ public class McpRemoteClient {
         }
         if (res.status() == 401 || res.status() == 403) {
             throw new RemoteRejectException(res.status(), null,
-                    "server " + serverName + " refused HTTP " + res.status()
-                            + " — check z.mcp.servers[" + serverName + "].headers");
+                    "server " + serverName + " refused HTTP " + res.status() + " to " + method
+                            + ": we sent " + credentialProblem() + challengeOf(res)
+                            + " — check the headers of z.mcp.servers[] entry name=" + serverName);
         }
         if (!res.is2xx()) {
             throw new RemoteRejectException(res.status(), null,
@@ -236,6 +237,50 @@ public class McpRemoteClient {
         if (sid != null && !sid.isEmpty() && !sid.equals(sessionId)) sessionId = sid;
     }
 
+    private static final String BEARER_PREFIX = "Bearer ";
+
+    /**
+     * 被上游以凭证问题拒掉时, 报的不是"401"这个数字, 而是<em>我们这边到底带出去了什么</em>.
+     *
+     * <p>401 有两种成因, 要改的地方在两台机器上: 这条上游压根没配凭证(典型形状是配置里写了
+     * {@code Authorization: "Bearer ${SOME_TOKEN}"} 而环境变量没给, 头展开成只有方案名的空壳,
+     * 对方只能判"请求不成形"), 和配了但不在对方的白名单里. 只报状态码等于让运维在 hub 的
+     * {@code servers[].headers} 和叶子的 {@code bearer-tokens} 之间来回猜.
+     *
+     * <p>只报形状不报值 —— 凭证不进异常消息, 也就不会跟着日志和状态视图跑到别处.
+     */
+    private String credentialProblem() {
+        Map<String, String> configured = config.getHeaders();
+        if (configured == null || configured.isEmpty()) {
+            return "no credential is configured for this upstream (z.mcp.servers[] headers is empty)";
+        }
+        String sent = null;
+        for (Map.Entry<String, String> e : configured.entrySet()) {
+            if (e.getKey() != null && e.getKey().equalsIgnoreCase("Authorization")) {
+                sent = e.getValue();
+                break;
+            }
+        }
+        if (sent == null) return "no Authorization header among the configured headers";
+        // 只 trim 两头: "Bearer " 后面那个空格是"有方案名、没有令牌值"这一形状的全部证据,
+        // 连着 trim 掉就只剩一个 "Bearer", 会被误报成"写法不对"而不是"变量没给值".
+        String value = sent.trim();
+        boolean bearerShaped = value.regionMatches(true, 0, BEARER_PREFIX, 0, BEARER_PREFIX.length())
+                || value.equalsIgnoreCase("Bearer");
+        if (!bearerShaped) return "Authorization is not of the form \"Bearer <token>\"";
+        if (value.length() <= BEARER_PREFIX.length()) {
+            return "Authorization has a \"Bearer \" prefix but no token value"
+                    + " (the variable behind it is unset)";
+        }
+        return "a bearer token that the upstream does not accept";
+    }
+
+    /** 上游的 {@code WWW-Authenticate}: 三种挑战形状分别对应"去取凭证/换令牌再来/别重试". */
+    private static String challengeOf(JsonRpcExchange.Response res) {
+        String challenge = res.header("WWW-Authenticate");
+        return challenge == null || challenge.trim().isEmpty() ? "" : " (server challenge: "
+                + challenge.trim() + ")";
+    }
     private Map<String, String> headers() {
         Map<String, String> h = new LinkedHashMap<String, String>();
         if (config.getHeaders() != null) h.putAll(config.getHeaders());
@@ -301,7 +346,25 @@ public class McpRemoteClient {
                 serverName,
                 inputSchema == null || inputSchema.isNull() ? null : inputSchema.toString(),
                 outputSchema == null || outputSchema.isNull() ? null : outputSchema.toString(),
-                annotations(t.get("annotations")));
+                annotations(t.get("annotations")),
+                origins(t));
+    }
+
+    /**
+     * 上游 {@code _meta["z-mcp/origins"]} 里的来源链(逗号分隔). 没有该键 —— 例如对方不是 z-mcp,
+     * 或它是本机自己的内置工具 —— 返回 null, 由广告侧从空链起算.
+     */
+    private static List<String> origins(JsonNode t) {
+        JsonNode meta = t.get("_meta");
+        if (meta == null || !meta.isObject()) return null;
+        JsonNode node = meta.get("z-mcp/origins");
+        if (node == null || node.isNull()) return null;
+        List<String> out = new ArrayList<String>();
+        for (String hop : node.asText("").split(",")) {
+            String trimmed = hop.trim();
+            if (!trimmed.isEmpty()) out.add(trimmed);
+        }
+        return out;
     }
 
     static ToolAnnotations annotations(JsonNode node) {

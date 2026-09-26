@@ -25,6 +25,7 @@ Java **8** 可用的 [Model Context Protocol](https://modelcontextprotocol.io) �
 | `z-mcp-core` | 注册中心、协议分发器、Streamable HTTP 端点、安全/会话/限流、上游客户端与 stdio/HTTP 传输、内置工具 |
 | `z-mcp-starter` | `ZMcpAutoConfiguration`，同时提供 Boot 2 的 `spring.factories` 与 Boot 3 的 `AutoConfiguration.imports` |
 | `z-mcp-admin` | 控制面只读端点 `${z.mcp.base-path}/mcp/admin/*`，默认不挂载 |
+| `z-mcp-server` | **进程**（前四个是库）：一个 fat jar 装 `hub` / `text` / `codec` 三种角色，`java -jar` 起来就是一个能被任意 MCP 客户端挂上的 server。见「独立进程宿主」 |
 
 ## 快速开始
 
@@ -61,7 +62,7 @@ public class OrderTools {
 }
 ```
 
-自检（不经过 JSON-RPC，给探针用）：`curl localhost:8080/mcp/info`
+自检（不经过 JSON-RPC，给探针用）：`curl -H "Authorization: Bearer $TOKEN" localhost:8080/mcp/info` —— 这台探针自己也在闸后面，没配 `bearer-tokens` 时 `Authorization` 那一段可以省
 
 一次完整握手（协议要求非 `initialize` 请求必须带会话头）：
 
@@ -87,7 +88,9 @@ curl -sS -X POST localhost:8080/mcp \
 
 支持的 revision：`2024-11-05`、`2025-03-26`、`2025-06-18`、`2025-11-25`。客户端请求的版本在列表内则原样回显，否则回 `2025-11-25`；未声明版本时按协议兜底假定 `2025-03-26`。
 
-2026-07-28 的无状态 revision **有意不跟**：它取消了会话，而本项目的上游聚合与安全边界都以会话为主键。
+* **支持集与参考实现同点，不是落后**：官方 java-sdk 的 `main` 今天（09-26 经 `api.github.com` 的 contents 接口取回，686 字节）在 `mcp-core/src/main/java/io/modelcontextprotocol/spec/ProtocolVersions.java` 里只声明 `MCP_2024_11_05` / `MCP_2025_03_26` / `MCP_2025_06_18` / `MCP_2025_11_25` 四个常量，没有 2026 那一档。（取回过程里两件事值得记：这个文件在旧的 `mcp/…` 路径下已经是 404 —— SDK 把模块改名成了 `mcp-core/`，那个 404 是真的"路径没了"不是网络故障；而今天 `raw.githubusercontent.com` 本身确实在间歇超时，同一份内容改走 `api.github.com` 的 contents 接口一次就通了。）
+* **2026-07-28 有意不跟**。规范仓库今天同时挂着 `2026-07-28` 与 `2026-07-28-RC` 两个 tag，前者是正式版。它把 `initialize`/`notifications/initialized` 握手、`Mcp-Session-Id` 与协议会话、SSE 续传（`Last-Event-ID`）、`ping`、`logging/setLevel`、`resources/subscribe` 一起取消，改成每个请求在 `_meta` 里带 `io.modelcontextprotocol/protocolVersion` 与 `clientCapabilities`，新增 `server/discover`、`subscriptions/listen`、MRTR（`resultType: "input_required"`）、必需的 `Mcp-Method`/`Mcp-Name` 头和 `ttlMs`/`cacheScope`。本仓的上游聚合与安全边界都以会话为主键，跟这一版等于把主键拆掉，而且真实客户端目前还没跟进。
+* 但那一版的**错误码分配政策**已经影响本仓怎么挑码（`docs/specification/2026-07-28/changelog.mdx` 第 12 条）：`-32000…-32019` 归实现自定义（现有 SDK 用法豁免），`-32020…-32099` 留给规范，并把草案自己引入的三个码重编号（`HeaderMismatch -32001→-32020`、`MissingRequiredClientCapability -32003→-32021`、`UnsupportedProtocolVersion -32004→-32022`）。本仓的 `UNSUPPORTED_PROTOCOL_VERSION` 取 `-32022`：只支持到 2025-11-25 的前提下，这个场合规范**没有**规定 JSON-RPC 码（`2025-11-25/basic/transports.mdx` 通篇没有 `-32xxx`，只说 MUST 回 `400 Bad Request`），于是挑一个规范日后认领的值，将来真去跟这一版时客户端读到的码不必改。反过来 `RESOURCE_NOT_FOUND` 仍留 `-32002` —— 那是 `2025-11-25/server/resources.mdx` 白纸黑字的值，2026 那一版才把它并到 `-32602`，而本仓不声称支持 2026。
 
 | 已实现的方法 | |
 | --- | --- |
@@ -128,10 +131,12 @@ curl -sS -X POST localhost:8080/mcp \
 * 单一端点 `${z.mcp.base-path}/mcp`，POST/GET/DELETE 三个动词；
 * `Accept` 必须同时列出 `application/json` 与 `text/event-stream`（协议原文是 MUST，且这条 MUST 属于 **POST** 那一路），否则 `406`；不带 `Accept` 或 `*/*` 放行；
 * `GET /mcp`（服务端主动通知的那条流）协议只给了两个出口：要么 `text/event-stream`，要么 `405`——**全文没有 GET 侧的 406 规则**。所以这里只要求客户端表明"收得了流"（`text/event-stream`、`*/*` 或不带 `Accept`），否则回 `405`。为什么不是 406：真客户端把 GET 流上的 406 读成"这条 MCP 连接坏了"（Gemini CLI、LibreChat 都为此报过 issue），把 405 读成"这里没有推送流，继续用 POST"——后者才是它们处理得动的形状。回 200 更糟：静默开一条没人看的流，配置者只会以为推送生效了；
+* `POST /mcp` 的 `Content-Type` 只认 `application/json`，否则 `415`（协议 2025-06-18 "Sending Messages" 第 3 条：体 MUST 是 `application/json`，不支持的类型 MUST 回 415）。判据 `contentTypeOk` 剥掉 `;charset=...` 这类参数、大小写不敏感，因此 `application/json;charset=UTF-8` 照收；**不带这个头也拒**——缺省意味着发送方从没声称过自己送的是什么，服务端没理由替他猜。响应体与其余传输层错误同形（`-32600` + 那句 `Content-Type must be application/json`），因为只回状态码的客户端会原样重试同一份头。0.2.0 之前这一维是完全空的：`Content-Type: text/plain` 的 JSON 体被照单解析并执行，实测在 250 部署盘上 `interop_malformed_run1.log` 的 `non_json_content_type_is_rejected_explicitly` 读出 `200 + result`，而参照实现（官方 python SDK `streamable_http.py` 的 `_check_content_type`）在同一请求上回 415。**这道闸第一次红是在红自己的测试**：加完之后 starter 有 16 条挂在握手那一步（`ZMcpSseStreamTest` 10 / `ZMcpCancellationTest` 3 / `ZMcpSseKeepAliveTest` 3），因为它们用 `HttpEntity<String>` 送体而 RestTemplate 给 String 补的默认头就是 `text/plain;charset=UTF-8` —— 也就是说本仓自己的客户端一直是非合规的，只是服务端从不检查所以看不见。修法是一律补显式 `application/json`（同仓 `ZMcpHttpEndpointTest` 早就是这么写的），没有放宽判定。层级各钉一层：core 的 `JsonRpcControllerTransportTest` 用 `MockHttpServletRequest` 钉形状（四种坏头、缺头、带参数仍收、以及"闸在会话闸之前"），starter 的 `non_json_content_type_is_refused_by_the_real_container` 过真 Tomcat 钉同一件事——后者是对照四格：`initialize` 在 `text/plain` 下 415、在 `application/json` 下 200，缺会话的 `tools/list` 在 `application/json` 下 400、在 `text/plain` 下 415，只测 415 的话一个"永远 415"的实现也能过。一处与参照实现**故意不同**：它按 `part == "application/json"` 逐字比，于是大写形式会被它自己拒掉，而 RFC 2045 说媒体类型不区分大小写。注入验收（脚本 `~/.cache/zmcp_server_gauges/ct27_inject.py`，逐支按字节还原并复验 sha256，分母钉在 255）：把判定条件改恒假 ⇒ 4 条具名红（core 三条 + starter 真容器那条）；换成"逐字等于 `application/json`"（不剥参数）⇒ 恰好 1 条红，红的是带 `charset` 的正对照。两支红集不重叠 ⇒ "拒太少"与"拒太多"是两个独立的方向，各有一层守着。没红过的那条 `content_type_ok_strips_parameters_and_is_case_insensitive` 守的是判据本身的真值表，它结构上不可能被"调用点改动"类变异打到，所以不算漏。改完在 250 上按字节对账重发（jar `6c5f7be9117fefc7…`，本机与远端 sha256 同值；并且先读**嵌在 jar 里的** `z-mcp-core` 那个 class 的常量池确认 `Content-Type must be application/json` 真的进了构件 —— 只看源码树会被"还原源码 ≠ 还原构件"那一课再骗一次），三把尺同轮复测：`verify_250_run6.log` `PASS=40 FAIL=0`、`interop_malformed_run3.log` `PASS=10 FAIL=0`（原来那格 FAIL 现在读 `415` + 同形 JSON-RPC 体，判据同时从"400 或 415 都算拒"收窄成"必须 415 且点名 `application/json`"，因为 400 是会话闸顺手挡的、量不到这一维）、`interop_sdk_run8.log` 仍是 `PASS=33 FAIL=0 NOT_COVERED=2` ⇒ 官方客户端自己发的头一直是 `application/json`，这道闸没有把它挡在门外。
 * 非 `initialize` 请求必须带 `Mcp-Session-Id`；服务端不再认识该 id ⇒ `404`，客户端据此重新 `initialize`；
 * `GET /mcp` 带 `Last-Event-ID` 时按上一节通知里说的续传处理：非数字或负数 ⇒ `400`（事件 id 是我们自己发的十进制数，别的一律按"这客户端不可信"办），位置已被缓冲淘汰 ⇒ `400`，其余 ⇒ 补发 + 续流；流上响应一律带 `X-Accel-Buffering: no`，因为 nginx 默认真的会整条缓冲 SSE —— 不关的话推送在配置层面"生效"、在客户端一侧从来不到货；
 * `initialize` 带着别人的会话 id 来 ⇒ `400`；
 * `MCP-Protocol-Version` 与会话协商结果不一致 ⇒ `400`；**不带**这个头不是错误（协议规定缺省时按 `2025-03-26` 假定，本项目按会话已协商的版本走）；
+* 头里那个版本**本身不支持**也在 `400` 之列（JSON-RPC 体带 `-32022 UnsupportedProtocolVersion`，message 里列出支持集，客户端不用猜），判据是一个只认"头存在且不在支持集"的 `isUnsupportedVersion`：`POST /mcp`、`GET /mcp`（流）、`DELETE /mcp` 三个入口各调一次，位置都在闸之后、碰会话之前。0.2.0 之前这一维只在"有会话可比"时成立 —— `session.enabled=false` 下没有任何东西和头对照，一个声明了 `2026-07-28` 的请求会被当成缺省按 `2025-03-26` 服务掉，而流和 `DELETE` 两路干脆不读这个头。校验放在请求入口而不是会话比较里，就是因为无状态模式没有会话可比。规范在这一句上**只规定状态码、对响应体保持沉默**（它明确允许带 JSON-RPC error 体的只有 Origin 那一路的 403、和 notification 被拒那一路的 400），所以：POST 那一路带体（`-32022` + 支持集，`id` 为 `null` —— 与本仓其它传输层 400 同形），而流与 `DELETE` 两路回**裸 400**，这是本服务的取舍不是条文：GET 那一路客户端的 `Accept` 要的是 `text/event-stream`，回一份 `application/json` 等于自己制造一次内容协商冲突；`DELETE` 成功时本来就是 200 空体，没有哪个客户端会去读它的错误体。这条头**不管辖 `initialize`**：握手那趟以 `params.protocolVersion` 为准，头里带什么都不改变结果（有测试钉住，防止把"校验版本头"误实现成"版本头一票否决"）。注入验收（脚本 `~/.cache/zmcp_guards/mutate_round2.py`，逐支按字节还原并复验 md5）：把判据整个摘掉 ⇒ 3 条红；改成"带版本头就拒" ⇒ 9 条红（正对照全灭，因为 `withSession()` 那个助手会带一个受支持的头）；把校验挪去也管握手 ⇒ 只有那一条握手用例红；GET／`DELETE` 各自不校验 ⇒ 各红自己那一条。上一轮两处"预期红集"算错都是我的错不是守卫的错：M2 少算了共用助手的波及面，M3 多算了一条根本不带版本头的用例（它的 400 由"缺会话"那一支给出，与版本无关）。同一趟里还删掉了一条**永远走不到的**分支：`handler.handle(...)` 之后再判 `McpSchema.isSupported(ctx.negotiatedVersion)` 并回 `-32022` —— 协商函数只会从 `SUPPORTED_VERSIONS` 里取值，所以这个判据恒假，它给读者的印象（"发出去之前还会再验一次"）没有任何实现兑现。它真正想守的那条不变量（降级目标自身必须在支持集里）现在由 `McpProtocolHandlerTest.the_downgrade_target_is_itself_supported` 直接钉住：`isSupported(negotiate(任何东西))` 恒真、`negotiate` 在垃圾/缺省/已知输入下都落在支持集内，且 `2026-07-28` 确实不在。
 * 请求体上限 4 MiB ⇒ `413`；批量数组体按 2025-06-18 的删除明确拒绝，而不是静默只处理第一个；
 * 已废弃的 HTTP+SSE 传输（2024-11-05 的双端点形状）不再接受；
 * 限流按会话（无会话时按来源地址）计数，超限 `429` + `Retry-After: 1`；
@@ -141,7 +146,9 @@ curl -sS -X POST localhost:8080/mcp \
 
 0.1.x 里 `basePath` / `exposeAdmin` / `healthCheckIntervalSeconds` / `servers` **没有任何人读取**，是死配置。0.2.0 起每一项都对应一个真实行为，缺省值按"协议合规优先"选取。
 
-逐项核过：43 个 `private` 字段里 5 个是嵌套配置组（`session` / `sse` / `security` / `rate-limit` / `servers`），剩下 **38 个可配字段有 36 个存在 main 代码里的 getter 读取点**，另外 2 个由 Spring 自己绑定 —— `base-path` 走两个 controller 上的 `@RequestMapping("${z.mcp.base-path:}")`，`expose-admin` 走 `@ConditionalOnProperty`。所以**全文找不到 `getBasePath()` 的调用点不等于这条配置是死的**，别照着"有没有人调 getter"去复查这一项。这两个字段另有真 Tomcat 用例兜底（见「构建与测试」里的 `ZMcpHttpEndpointTest` / `ZMcpAdminEndpointTest`）：不起 mock、直接按 URL 打进去。这组数是量的、可复跑（脚本 `~/.cache/zmcp_logs/cfg_cov.py`）：把 `McpProperties` 的注释剥掉后逐个 `getXxx()`/`isXxx()` 去 main 源码（**27 个文件**，测试与 `target/` 排除）里找调用点，命中为零的只有 `basePath`、`exposeAdmin` —— 也就是上面那两条。加进 `sse.keep-alive-seconds` 之后重跑过一遍，读取得多点恰好多出 `McpSessionStore.startKeepAliveIfNeeded()` 这一处。
+逐项核过：44 个 `private` 字段里 5 个是嵌套配置组（`session` / `sse` / `security` / `rate-limit` / `servers`），剩下 **39 个可配字段有 36 个存在 main 代码里的 getter 读取点**，另外 **3 个由 Spring 自己按字符串键绑定** —— `enabled` 走 `ZMcpAutoConfiguration:32` 的 `@ConditionalOnProperty(name = "z.mcp.enabled")`，`expose-admin` 走同文件 `:124`，`base-path` 走 `JsonRpcController:50` 与 `AdminController:30` 上的 `@RequestMapping("${z.mcp.base-path:}")`。所以**全文找不到 `getBasePath()` 的调用点不等于这条配置是死的**，别照着"有没有人调 getter"去复查这一项。这三个字段都有对得上号的用例兜底：`base-path` / `expose-admin` 走真 servlet 容器（`@SpringBootTest(RANDOM_PORT)` 的 `ZMcpHttpEndpointTest` / `ZMcpAdminEndpointTest`，不起 mock、直接按 URL 打进去），`enabled` 走 `ZMcpAutoConfigurationTest.nothing_is_wired_unless_the_module_is_asked_for()`（`ApplicationContextRunner`，断言键缺失时 `McpRegistry` / `McpProtocolHandler` 的 bean 数为 0）。
+
+这组数是量的、可复跑，但**必须按接收者归属去量**（脚本 `~/.cache/zmcp_guards/cfg_cov2.py`，09-26 加了 `z-mcp-server` 之后复跑：32 个 main 文件 / 44 字段 / 39 可配 / 36 有归属读取点）。第一版 `~/.cache/zmcp_logs/cfg_cov.py` 只按 getter 名字在 main 源码里找 `.getXxx()`/`.isXxx()`，同一棵树今天复跑给出 **42 有人读 / 2 没人读** —— 那是**虚高**：`enabled` 这个字段名在 `McpProperties` / `Session` / `Sse` / `RateLimit` / `ServerConfig` 里各出现一次，而真实调用点一共 7 处（`TransportSecurityGuard:120` 是 RateLimit、`JsonRpcController:153/206/252/319` 是 Session、`:249` 是 Sse、`ExternalServerManager:123` 是 ServerConfig），一处 `rl.isEnabled()` 会把五个同名字段全记成"有人读"。按"链上访问器名 + 同文件里的变量声明类型"重新归属后，这 7 处各归各家，`McpProperties.isEnabled()` 才是真的零命中 —— 它不是漏接线，是根本不该由 getter 读（开关发生在 bean 装配之前，装配好了才谈得上读属性）。本批新加的 `builtin-tools-enabled` 不在这个歧义里（访问器叫 `isBuiltinToolsEnabled()`，只有一个读取点 `ZMcpAutoConfiguration`），它之所以存在，是因为叶子角色一旦照抄默认值就会把四件中心件推给 hub。改成按接收者归属的口径之后，39 = 36 + 3，两边都对得上；`sse.keep-alive-seconds` 那条的读取点是 `McpSessionStore.startKeepAliveIfNeeded()`。
 
 | 键 | 默认 | 作用 |
 | --- | --- | --- |
@@ -153,6 +160,7 @@ curl -sS -X POST localhost:8080/mcp \
 | `require-initialized` | `true` | 未完成 `initialize` 前只接受 `ping` |
 | `validate-arguments` | `true` | 按 `inputSchema` 校验工具入参，不合法按执行错误（`isError`）回 |
 | `strict-tool-names` | `true` | 工具名强制 `[A-Za-z0-9_.-]{1,128}` |
+| `builtin-tools-enabled` | `true` | 是否登记那四件中心件（`echo` / `get_time` / `generate_uuid` / `system_info`）与三条自省资源。被别的 hub 聚合的叶子服务应设 `false`，否则撞名成 `text__echo` 那类前缀件（见「独立进程宿主」） |
 | `page-size` | `0` | `tools/list`/`resources/list`/`prompts/list` 每页条数，`0` = 一次给全 |
 | `tool-timeout-seconds` | `60` | 单次工具调用超时，`0` = 不限。这一项同时决定**能不能中断**：`>0` 时工具跑在线程池里、取消可以中断它；配成 `0` 就在调用线程上直接跑，没人能中断（那条请求仍会以 `-3280` 收口，但要等工具自己跑完） |
 | `health-check-interval-seconds` | `60` | 上游 server 健康检查周期，`0` = 禁用 |
@@ -166,7 +174,7 @@ curl -sS -X POST localhost:8080/mcp \
 | `security.allowed-origins` | 空 | 空 = 只允许与 `Host` 同源 |
 | `security.allow-missing-origin` | `true` | 无 `Origin` 头的非浏览器客户端放行 |
 | `security.allowed-hosts` | 空 | 空 = 不校验；生产应收敛为显式白名单 |
-| `security.bearer-tokens` | 空 | **空 = 关闭鉴权**，只适用于本机/内网可信网络；非空时数据面与控制面同时生效 |
+| `security.bearer-tokens` | 空 | **空 = 关闭鉴权**，只适用于本机/内网可信网络；非空时数据面与控制面同时生效，401 的挑战形状分三种（见「有意边界」） |
 | `security.trusted-proxy` | `false` | 仅当部署在可信反代后才取 `X-Forwarded-Host` |
 | `rate-limit.enabled` / `requests-per-minute` / `burst` | `true` / `300` / `50` | 协议要求服务端 MUST 限流，故默认开 |
 | `servers[]` | 空 | 上游 MCP server 列表，见下节 |
@@ -201,15 +209,143 @@ z:
 * 撞名自动加 `<server>__` 前缀（`acme__get_time`），内置与上游两份都保留 —— 静默覆盖会让"工具去哪了"变成一个查不完的坑。
 * 上游不可达 ⇒ 它的工具从目录里**撤走**，并在 `lastError` 里留下原因；恢复后重新发布。
 * 重新同步只换目录，不重握手（会话复用）；但一旦连接被判死并摘除，下一次健康检查会新建传输，而不是对着已死的管道重连 —— 否则"恢复"永远不会发生。
+* **上游目录逐字未变时不动注册表**（签名相同且自己那批条目还在 ⇒ 整轮跳过）。这条不是省 CPU，是省一次谎报：`register` / `unregister` 各会 fire 一次 `Change.TOOLS`，而每次 fire 都会变成每条在线会话的一帧 `notifications/tools/list_changed`；协议又要求客户端收到它就重取 `tools/list` —— 于是"什么都没变的一轮健康检查"会给 N 条会话各造成 2×工具数 次无意义的重取。250 上实测（两台叶子 × 两条工具、`health-check-interval-seconds: 30`）修前一条静默流 **80 秒收到 24 帧**（`~/.cache/zmcp_server_gauges/watch_churn.sh` → `churn_stream.txt`），修后同一条流 0 帧。摘除（`detach`）会把签名一起作废，否则"上游断了又原样回来"会被这个跳过逻辑吃掉。签名按名字排序取"会进目录的字段"，**来源链也算其中一个字段** —— 链变了哪怕内容没变，收与不收的判定就变了，不该被这一轮跳过。
 * 状态里的 `connected` 由传输本身回答（`JsonRpcExchange.isAlive()`），不是握手时置位、之后永不复位的 flag。stdio 的子进程一退（不管是进程没了还是 stdout 到了 EOF），`/mcp/admin` 立刻变 `false`，不需要先失败一次调用才看得见。
 * `enabled: false` 的 server 连拨号都不会发生。
 * 一个死 server 不能带走另一个 server，也不能带走内置工具。
 * stdio server 没有 URL，控制面就把它的**命令行**当入口显示（`/usr/bin/java -cp …`），而不是回一个 `null` 让运维去猜是哪个子进程。
 
+## 独立进程宿主 `z-mcp-server`
+
+前四个模块是库 —— 要有人 `java -jar` 起来它们才说话。`z-mcp-server` 就是那个"有人"：它不引入任何新能力，只是把 starter 自动装配的那套件按角色摆成一个进程，好让"MCP 服务中心"这件事在没有人改自己应用之前先成立。
+
+**一个 jar 装三种角色**，`Z_MCP_ROLE` 选哪一份 `application-{role}.yml`（默认 `hub`）：
+
+| 角色 | 端口 | 目录内容 |
+| --- | --- | --- |
+| `hub` | `18095` | 四条内置工具 + `find_tools`（按关键词检索目录）+ `registry_state`（上游真实连接状态），外加 `z.mcp.servers[]` 聚合来的上游工具 |
+| `text` | `18096` | `text_stats`（字符/词/行/UTF-8 字节）、`text_transform`（upper/lower/snake/kebab/title/reverse） |
+| `codec` | `18097` | `base64_codec`（标准与 URL-safe 两套字母表）、`hash_digest`（md5/sha-1/sha-256/sha-512，十六进制） |
+
+两个叶子角色都配了 `builtin-tools-enabled: false`。这不是洁癖：`echo`/`get_time`/`system_info` 在 hub 上本来就有，叶子带着它们被聚合就会撞名成 `text__echo` —— 一张目录里混着真工具和前缀化的调试残留，"哪条才是我要的"就变成了使用者的负担。同理，那三条自省资源（`z-mcp://tools` 等）描述的是注册中心自己，叶子没有中心可描述，于是 builtin 关掉时它们一起消失（`RolesTest` 按 `resources/list` 的空数组钉住这一点）。
+
+环境变量（全部有默认值，`application.yml` 里**刻意不含任何口令**）：
+
+| 变量 | 落到哪 | 说明 |
+| --- | --- | --- |
+| `Z_MCP_ROLE` | `spring.profiles.active` | `hub` / `text` / `codec`，缺省 `hub` |
+| `Z_MCP_PORT` | `server.port` | 按角色各有一个缺省值，同机部署三角色不用互相让端口 |
+| `Z_MCP_BEARER_TOKENS` | `z.mcp.security.bearer-tokens` | 逗号分隔可给多条（轮换期新旧并存）；不给就是空列表 = **关闭鉴权** |
+| `Z_MCP_TEXT_ENDPOINT` / `Z_MCP_CODEC_ENDPOINT` | hub 的 `servers[0..1].endpoint` | 上游不在默认端口上时改这里，不用改 yml |
+| `Z_MCP_UPSTREAM_TOKEN` | hub 发给上游的 `Authorization` | 中心侧的出站凭证，与上面那把入站的**是两把**（叶子收 token、hub 发 token） |
+
+这里有两件是**量过**而不是推出来的（`BearerGateTest` 走真 HTTP + 真 profile，加上面的 fat-jar 冒烟）：
+
+* `bearer-tokens: ${Z_MCP_BEARER_TOKENS:}` 在变量未设时绑成**空列表**，不是 `[""]`。这一条值得钉，是因为两种形状在配置面上只差一个冒号，而 `[""]` 会让闸永久拒绝一切请求（空白名单=放开，含空串的白名单=门锁死）；实测未设变量时匿名握手 200、`/mcp/info` 200、`/mcp/admin/overview` 200。
+* 逗号分隔确实绑成多元素 `List<String>`（`t1,t2` → 两个 token，两个都打得开门），所以轮换不用停机：**先加新令牌、再摘旧令牌**，中间那段时间两把都有效。
+
+注册一台新的上游（不改 yml，命令行按位覆盖即可 —— Spring 的 per-index 覆盖是**与 yml 合并**而不是替换整个元素，所以 `servers[2]` 追加一台、`servers[1].enabled=false` 摘掉一台都能表达）：
+
+```bash
+java -jar z-mcp-server-0.2.0.jar \
+  --z.mcp.servers[2].name=acme --z.mcp.servers[2].transport=http \
+  --z.mcp.servers[2].endpoint=http://127.0.0.1:9100/mcp \
+  --z.mcp.servers[2].headers.Authorization="Bearer ${ACME_TOKEN}"
+```
+
+构建与起进程（Java 8 基线；`repackage` 是模块自己的 pom 里那段 `spring-boot-maven-plugin`，少了它 `package` 出来的是一枚没有 `Main-Class` 的普通 jar，而**单测跑在 repackage 之前，没有任何测试会因为它缺失而红**）：
+
+```bash
+mvn -B -ntp -DskipTests -pl z-mcp-server -am package
+Z_MCP_ROLE=text Z_MCP_PORT=18096 Z_MCP_BEARER_TOKENS="a-token,b-token" \
+  java -jar z-mcp-server/target/z-mcp-server-0.2.0.jar
+```
+
+冒烟脚本 `~/.cache/zmcp_server_gauges/fatjar_smoke.sh`（日志同目录 `jar_hub.log` / `jar_text.log`）用一枚假版本 `9.9.9-probe` 起真进程量四件只有 `java -jar` 能量的事，09-26 15:58 实测全部成立：
+
+1. 不给任何变量 ⇒ profile 是 `hub`，`Z_MCP_PORT` 说话算数；
+2. `/mcp/info` 报的版本是 **`9.9.9-probe`** —— 值取自 jar 的 `Implementation-Version`，不是 `McpProperties` 里手抄的 `0.2.0`。之所以要用一个假版本号来量，是因为真版本号下"MANIFEST 那条路走通了"和"读到了兜底常量"给出**同一个字符串**，看多少次都判不出来；
+3. `Z_MCP_ROLE=text` 真的挑中了 `application-text.yml`（`serverInfo.name=z-mcp-text`、`instructions` 是文本服务那句、日志 `The following 1 profile is active: "text"`，目录里 2 条工具、0 条资源）；
+4. `Z_MCP_BEARER_TOKENS` 在进程级别锁上了门：匿名 `/mcp/info` 回 `401` + `WWW-Authenticate: Bearer realm="z-mcp"`，而**逗号分隔的第二把** `b-token` 打得开。
+
+顺带一条健康检查的形状：默认 hub 的两条上游端口上没人时，`/mcp/admin/health` 回 `DEGRADED` 并点名 `text`、`codec`（`unreachableServers`），启动日志留下两行 `mcp server text unavailable: Connection refused` —— 首连不在启动路径上，进程 1.0 秒起来，两条死上游既不拖慢启动也不把它报成 `UP`。
+
+### 250 上的实机部署（09-26 16:1x 起在跑，17:17 换成带来源链的那一枚）
+
+同一枚 fat jar 在 192.168.31.250 上按角色起三个进程，端口就是上面那三个（**直连**，不碰 250 上共用的 nginx —— 那是别人的家目录）：
+
+```
+~/zmcp/lib/z-mcp-server-0.2.0.jar   # sha256 306eaf33a1908896…bcfac091（17:17 重发，带来源链），与本机 target/ 逐字节同一枚
+~/zmcp/logs/{hub,text,codec}.log
+~/zmcp/run/{hub,text,codec}.pid      # 26073 / 26021 / 26039
+~/zmcp/env.sh                        # 600，三把 token 只活在这里，重发时沿用（不换 token 才能证明"旧的能打通靠的是身份判据不是凭证"）
+```
+
+口令不落版本库、不进命令行：`deploy_250.sh` 在远端 `openssl rand -hex 16` 现生成、写进 `~/zmcp/env.sh`（600），值不打印；本机验收用的 `~/.cache/zmcp_server_gauges/{hub,leaf}.hdr` 也是 600 的请求头文件，`curl -H @文件` 而不是 `-H "Authorization: Bearer …"` —— 后者会让同一台机器上任何一步 `ps` 读到它。**文档里记的是"口令在哪个文件"，不是口令本身。**
+
+脚本三件（都在 `~/.cache/zmcp_server_gauges/`）：
+
+* `deploy_250.sh`：先做**jar 字节级预检**（从 `BOOT-INF/classes/application*.yml` 里 grep 出打包进去的 `active: ${Z_MCP_ROLE:hub}`、`bearer-tokens: ${Z_MCP_BEARER_TOKENS:}`、两份叶子 yml 里的 `builtin-tools-enabled: false`），再核空闲端口 → scp → 远端 sha256 对账 → 生成 token → 按 text→codec→hub 起（叶子先起来，hub 首连就不会白摔一跤）→ 只认 `000` 的就绪轮询；
+* `remote_start.sh` / `remote_stop.sh`：启动用 `( … exec java … ) & echo $!`，因为 `&&` 链整个放后台时 `$!` 记的是子 shell 而不是 java；停止只杀 `/proc/<pid>/cmdline` 里匹配 `z-mcp-server-0.2.0.jar` 的进程，250 上还有别人的 JVM 在跑（:8886 / :8888 / :18090 / :5278），按端口或按 `pkill -f java` 停都是拿别人的进程当代价；
+* `verify_250.sh`：从 Mac 打向 250 的 **40 条**断言（`verify_250_run3.log`，`合计 PASS=40 FAIL=0`）—— `/mcp/info` 形状、hub 与叶子两把 token **互不通用**、匿名 401 带裸挑战、错 token 的 `error="invalid_token"`、完整握手到 `Mcp-Session-Id` 再到 `initialized` 202、hub 目录恰好 10 条、三条自省资源、`text_stats` 跨进程算出 words=3/utf8Bytes=17、`base64_codec`→`aGVsbG8=`、`hash_digest`→`sha-256 ba7816bf8f01cfea`、`find_tools`、`registry_state` 的 `2 2 10 0.2.0`、健康 `UP`、控制面匿名 401、叶子各自 2 条工具 0 条资源、SSE priming 帧与 `retry`、`DELETE` 之后旧会话 404 且理由点名会话。
+
+这次部署本身交了一笔学费，值得留在这里：**还原源码不等于还原构件**。第一轮 38 条里红 17 条（修掉量具自身的错之后是 38→40 条，最终 `PASS=40 FAIL=0`）、hub 目录从 150 涨到 228 条，三台都以 hub 起并互相聚合。取证结果是 `/proc/<pid>/environ` 里明明有 `Z_MCP_ROLE=text`，profile 却是 hub —— 因为那枚 jar 是注入探针 P2（把 `application.yml` 的默认角色改成 `hub`）留在 `target/` 里的产物：探针按 md5 把**源码**还原了，但 `mvn verify` 会把 `src/main/resources` 复制进 `target/classes` 再 repackage，**改过的字节还活在 jar 里**。源码树的 mtime 和 jar 的 sha256 都回答不了"打包进去的是哪一份"，只有 `unzip -p … | grep` 能。预检那一步因此成为部署流程的一部分，而不是可选的谨慎。
+
+顺带记下这次事故暴露的性质，以及它现在被守到哪一层：hub 指向"另一台 hub"而那台其实就是自己（或同配置的复制品）时，对岸的目录里装的是我这台目录的副本，于是每一轮再同步都往目录里加一代 —— 实测十分钟 150→228。机制是聚合的命名规则：上游工具**不与本地撞名时就按原名进目录**（撞了才加 `server__` 前缀），所以我把上一轮自己 invent 出来的那个前缀名在下一轮当成"别人的原名"收了进来。现在这道被 `ExternalServerManager` 在握手后就地拒掉：上游 `initialize` 回来的 `serverInfo.name` 等于本机 `z.mcp.server-name` 即判定自指，不拉目录、不登工具，`lastError` 写明是谁自指（判据取名字不取 endpoint —— 换端口、走 `localhost` 还是走机器名，自指都是同一个名字；`application-hub.yml` 的 `server-name` 就是 `z-mcp`，所以事故里那三台互为上游时会全部被拒）。这条由 `an_upstream_that_advertises_this_servers_own_name_is_refused` 钉住，先红后绿（红在 `expected:<0> but was:<2>`，红消息里那两个就是被抄进来的副本）。
+
+**名字不同的两台 hub 互为上游**（`hub-a` ↔ `hub-b`）此前是"仍未覆盖"，现在靠**来源链**界住了。自指判据在这个形状里必然失效 —— 两边握手看到的都是对岸自己的名字。所以判据换成分布式的：每台 z-mcp 在 `tools/list` 广告每条工具时，往 `_meta["z-mcp/origins"]`（逗号分隔，越近的一跳越靠后）追加自己的 `server-name`；拉取侧（`McpRemoteClient`）把那串链原样收进注册表（**不含自己**），下一跳再广告时又追加它自己。于是 a 的内置工具经 b 抄回来时链是 `hub-a,hub-b`，a 一看链上有自己就不收这一条。要点有三个：链**内置工具也要盖章**（内置工具若不带链，它经对岸抄回来时链上就只有对岸一跳，判据认不出"这就是我自己的工具"）；链上缺字段（第三方 hub 会把我们的 `_meta` 原样丢掉）时**照常收**，不能把判据写成"没链一律拒"；这条链不参与寻址，`server__` 前缀规则一字未改。钉子有三层：`tools_the_upstream_copied_from_us_are_not_copied_back`（假上游一页目录里同时放"对岸自己的"与"抄我的"两条，后者不许进、前者是阳性对照）、`the_provenance_chain_grows_by_exactly_one_hop_per_server`（广告侧恰好加一跳、且链上已有自己时不重复追加）、`two_hubs_that_aggregate_each_other_reach_a_fixed_point`（真起两个 Spring 上下文、真 Tomcat、互指上游，先等各 12 条，再连着六轮逐轮复量目录，六轮后仍 12 条且不许出现 `__origin__` 这种第二代前缀名）。两把注入探针 09-26 17:3x 在 `1eda79e7ed6a65a7` 那棵树上重跑过，**18:5x 又在当前树（`3c22289a735f6b15`）上重跑一遍**：C0 零改动 283 条全绿（core 200 + admin 7 + starter 55 + server 21，四格 tally 都打印），J1/J2 各自恰好 2 条具名红、**红集与 17:3x 逐条相同**（脚本 `~/.cache/zmcp_server_gauges/inject_chain.sh` → 17:3x 的 `chain_inject/run3.log`、18:5x 的 `chain_inject_tree6/`；这一遍跑在 `~/.cache/zmcp_chain_check` 的隔离副本上；它收尾那行打印的还是脚本里写死的 `1eda…` 字面量（那一版还没改），所以我另取一次副本的整树哈希对账：四档跑完仍是 `3c22289a735f6b15`，与主树同值 ⇒ 变异没在任一棵树上留东西）。那行字面量已改成"运行时先量本次基线、收尾与它比"—— 改完第一版把 `BASE=$(tree_hash)` 放在函数定义之前，`bash -n` 通过而取到空值，也一并修掉并单测它产得出哈希：**J1** 把拉取侧那句 `getOrigins().contains(self)` 换成恒假 ⇒ 恰好 2 条具名红 —— 单元那条之外，真进程那条红在 `第 2 轮之后 a 的目录必须还是 12 条`，盘上实测 **18** 条，多出来的 6 条正是 `origin__echo` / `origin__find_tools` … 这一族 —— 我自己抄出去、被对岸按它的配置名加了前缀、再被我收回来的第二代名字。（注意这一族长的是 `origin__x` 而不是 `__origin__x`，所以用例里那句 `assertFalse(…"__origin__"…)` **抓不到它**，真正咬住的是"12 条"那个数 —— 只写名字形状那句负向断言就是空跑的。）而 **J2** 只给非内置盖章（在 `meta.put("z-mcp/origins", …)` 那句上多合取一个 `&& !t.isBuiltin()`）⇒ 也是 2 条红：广告侧 `内置工具广告时要带上自己这一跳 expected:<z-mcp> but was:<null>`，不动点那条连 `awaitCatalog` 都过不去（等的 12 条等不到；17:3x 那遍盘上是 **18** 条 —— 但这个"死法"并不稳定，见下一句）—— 这一支就是"内置也必须盖章"那句的猎物。**但这条红的"死法"不稳定**：同一个变异体单独连跑 3 轮 `HubAggregationTest`（脚本 `~/.cache/zmcp_server_gauges/chain_j2_symptom.sh` → `chain_j2_symptom/summary.txt`，09-26 18:5x，每轮前后树哈希 `e6aafd49a443b8bb`/`3c22289a735f6b15`）⇒ **3/3 全红**，可其中 2 轮的消息是 `tools/list 期望 200, 实得 429 rate limit exceeded`，只有 1 轮给出"现在是 [18 条，含 `origin__*`]"。原因在等待助手本身：`Boot.until` 的通用 `catch` 会拿传输错**覆盖掉上一次真看到的目录**，而这条用例每 100 ms 打一次 `tools/list`，两轮等待之间就能把自家的限流预算（默认 300/min）打穿。⇒ 判红只认**具名用例 + 分母**，不认消息；要稳定拿到"18 条"那张照片，得让 `Boot.until` 在传输错时保留上一次成功的观察。**这两把探针的第一版各有一个自己的 bug，都记在脚本头部**：J2 原先写成 `t.isBuiltin() ? new ArrayList<String>() : new ArrayList<String>()` —— 两支一模一样，是个**等价变异**，277 条全绿差点被读成"内置盖章没钉住"；另一处是 mvn 不加 `-Dmaven.test.failure.ignore=true` 时 core 一红就中止 reactor，server 那 21 条**根本没跑**（第一次修成 `-fae` 也不对：fail-at-end 会跳过失败模块的下游），于是"第三红在第 2 轮"那句话在头两份日志里既没被证实也没被证伪 —— 它是被跳过读成"没出现"的。
+
+**还剩的边界**：链是 z-mcp 自己的约定，第三方 hub 若剥掉 `_meta`，它抄回来的东西就没有链可依 —— 那种环仍要靠"hub 别去聚合 hub"的部署纪律回避。协议里没有 `Max-Forwards` 那一类字段，这已经是不改协议能做到的最外层。
+
+### 16:44 重发：两条闸都在真进程上量过
+
+带上自指判据与"目录未变不重发布"之后重打 jar 发到 250，三件事各自有前后对账（都不靠单测自证）：
+
+* 40 条跨机验收复跑：`verify_250.sh` → `verify_250_run4.log`，`合计 PASS=40 FAIL=0`。这一条同时是"新闸没有误伤正常拓扑"的证据 —— hub 聚合 `text` / `codec` 两台上游仍各 2 条工具、目录仍是 10 条（自指判据比的是 `serverInfo.name`，叶子报的是 `z-mcp-text` / `z-mcp-codec`，不相等）。
+* 通知风暴：同一条尺 `watch_churn.sh`（开一条静默会话等 80 秒数帧）修前 **24 帧** `notifications/tools/list_changed`、修后 **0 帧**，而 `:keep-alive` 两边都是 3 帧 —— 后一句是必需的，否则"0 帧"也可能只是流根本没开起来。
+* 自指判据：另起一台一次性 hub（用完即杀），把它的**两格上游都指向 18095**，并把出站 token 设成 18095 的入站 token —— 于是握手一定成功，"被拒"只可能来自身份判据而不是 401。实测两格都 `connected=false / toolCount=0`，`lastError` 逐字是 `upstream text identifies itself as this server (z-mcp) — …`，`/mcp/admin/health` 回 `DEGRADED` 并点名两格，目录停在内置 6 条且**再等一轮健康检查仍是 6 条**（拒绝日志 4 行 = 两格 × 两轮）。这里"等 33 秒再看一次"是量具的一部分：只在启动时看一眼的话，"拒绝一次然后每轮照旧抄进来"这种形状是看不出来的。
+
+### 17:17 重发：来源链到了真进程
+
+带着 `_meta["z-mcp/origins"]` 重打、重发（`deploy_run4.log`：jar 字节级预检四行 PASS → 三枚端口空 → scp → 本机与远端 sha256 逐字节相同、`bytes=17997223` → 按 text→codec→hub 起）。三件事各自有读数，都不靠单测自证：
+
+* **40 条跨机验收再复跑**：`verify_250.sh` → `verify_250_run5.log`，`合计 PASS=40 FAIL=0`（40 行 PASS 逐条打印，不是"总数 40"）。
+* **链在两台机器上各自的形状**：叶子 `text` 广告 `text_stats` 时是 `{"z-mcp/origins":"z-mcp-text"}`（一跳，只有它自己）；hub 广告同一条时是 `{"z-mcp/server":"text","z-mcp/origins":"z-mcp-text,z-mcp"}`（两跳）；hub 的六条内置是 `{"z-mcp/origins":"z-mcp"}` 且**不带** `z-mcp/server`。最后一格顺带钉住两个语义：内置也盖了章（否则它经对岸抄回来时链上只有对岸一跳，判据认不出"这就是我自己的"），以及 `_meta` 那两个键不是一回事 —— `z-mcp/server` 存的是**配置名**（`servers[i].name: text`），链里走的是协议里的 `serverInfo.name`（`z-mcp-text`）。
+* **固定点**：hub 日志里 `mcp server … aggregated 2 of 2 upstream tool(s)` 恰好两行（每台上游首连一次），此后每一轮健康检查都不再多一行；整份日志 `grep -cE "WARN|ERROR"` 为 **0**。也就是说"目录不动"这件事在真进程上是**什么都不发生**，而不只是少发通知。
+* **通知风暴**：同一条尺 `watch_churn.sh` → `churn_run5.log`，80 秒静默会话收到 **0** 帧 `list_changed`、**3** 帧 `:keep-alive`（后一句是必需的对照，否则 0 也可能只是流没开起来）。
+
+量具自己也交了一笔：第一版链探针把 body 过了一道 `sed -n 's/^data: //p'`，打出 **0 字节**，看着完全像"服务端根本没广告 `_meta`"。真相是 POST 的回执是 `application/json`（只有 `GET /mcp` 那条流才是 `text/event-stream`），body 里就没有 `data:` 前缀可抠。**空输出先怀疑量具，再怀疑被测方。**
+
+### 挂进真实 MCP 客户端
+
+这台 hub 的最终验收不是"我自己的脚本打得开"，而是**别人家的 MCP 客户端**能不能挂上并用。挂在 Qoder 上写的是 `<repo>/.qoder/settings.local.json`（local 作用域、里面就是真 token，因此不进取版本库的 `settings.json`）：
+
+```json
+{ "mcpServers": { "z-mcp-hub-250": {
+    "type": "http",
+    "url": "http://192.168.31.250:18095/mcp",
+    "headers": { "Authorization": "Bearer <env.sh 里那把>" }
+} } }
+```
+
+写入后要让客户端重连（Qoder 是 `/mcp reload`）—— 这一步在人的那侧，代理做不到。等重连之前，可以先拿**配置文件里那一份 url + headers** 自己走一遍完整客户端时序（`09-26 16:49` 在 250 那枚新 jar 上复跑，五个断言都成立）：`initialize` → 200 + `Mcp-Session-Id` → `notifications/initialized` → `tools/list` 恰好 10 条（`echo` / `get_time` / `generate_uuid` / `system_info` / `find_tools` / `registry_state` / 两台的 `text_*` / 两台的 `base64_codec`+`hash_digest`）→ `tools/call text_stats{"text":"one two three"}` 回 `words:3, utf8Bytes:13` → `hash_digest hello` 回 `sha-256 2cf24dba…` → `DELETE` 带会话头 200、旧会话再请求 404。这一段的意义在于"能挂上的形状"由**客户端会读的同一份字节**证明，而不是由我另写一份等价的命令证明 —— 顺带暴露过一次自己的量具错：`DELETE` 漏带 `Mcp-Session-Id` 时回的是 `400`，那正是规范要的"会话头必带"，红的是探针不是服务。
+
+上面那一段仍然是**我按自己的理解手敲的 curl**。在等不到人重连的这段时间里，能拿到手的最强证据换成了**别人家的实现**：官方 python SDK（`modelcontextprotocol/python-sdk` 1.27.1，与本仓零共享代码 —— 它自带 pydantic 模型、自己校验 `Mcp-Session-Id`、自己发 `notifications/initialized`）驱动 250 上那台 hub，脚本 `~/.cache/zmcp_server_gauges/interop_sdk.py` → `interop_sdk_run5/6/7.log`，三轮都是 **33 条具名 PASS / 0 FAIL / 2 条 NOT_COVERED**。它答的是四类只有第三方客户端才答得了的问题：
+
+* **别人的 schema 层能不能读到我们的字段**：`_meta` 在 pydantic 那里落到 `Tool.meta`，`text_stats` 到客户端手里是 `{"z-mcp/server":"text","z-mcp/origins":"z-mcp-text,z-mcp"}` —— 来源链**穿过一个不相干的实现**到达了消费者，这件事本仓自己的测试结构上证明不了（它和我共享同一份解析代码）。
+* **期望值一律现场派生，不敲数字**：支持版本集取自服务端自己的 `GET /mcp/info.protocolVersions`（它列 4 个，协商到 `2025-11-25`）；"hub 该比叶子多一跳"取的是**叶子那台当场广告的那串**；"该出现 `server__x` 前缀名的集合"由两台叶子的目录求交算出来（本部署交集为空 ⇒ 前缀名集合也必须为空）；广告条数与 `/mcp/info.toolCount` 两把独立的尺对账（10 == 10）。
+* **错误走哪条通道**：未知工具 ⇒ JSON-RPC `-32602`（**报错而不是挂住**）；入参不合规 ⇒ 按 2025-11-25（SEP-1303）作为**执行错误**回 `isError`，且消息点名了缺哪个键 —— `$: missing required property 'text'`、`$: unknown property 'not_in_schema' not allowed`；同一趟里带正对照（`echo {"text":"ping-pong"}` 正常回显），否则"全都 isError"也能混过这一格。
+* **会话生命周期与闸**：官方客户端收尾真的会 `DELETE` —— 三次完整开合之后服务端会话数与本轮起点相同；`prompts`/`resources` 两处"广告了能力就该答得出、没广告就不该答"两条一致；数据面匿名 `initialize` ⇒ 401，错 token ⇒ `Bearer realm="z-mcp", error="invalid_token"`（部署面上就是这个形状）。
+
+跑第一版时两条 FAIL **都是我的判据错**，改法值得记下来，因为它是这个仓反复犯的那一种：① `transport` 我写成 `stream-http`，服务端一直是 `streamable-http`；② 我给"缺必填参数" expect 的是 **JSON-RPC 错误**（`McpError`），而实现按 SEP-1303 走 `isError` 执行错误 —— 于是一条正确的行为被判成缺陷。第 ② 条的正确修法不是把期望改成 `isError` 就完事，而是**两条通道同时量**并补正对照，因为"只 expect 一条通道"的判据在另一种实现下会同样假红。另记一笔免得后人误读：跨轮次 `sessions` 基线会从 1 涨到 3、4，那是正对照那把裸 `initialize` **故意不 DELETE** 留下的会话，`ttlSeconds=3600` 而 `sweepIfNeeded()` 只在 `create()` 时触发（最坏 60 s 一次），所以它按小时才退；这条断言刻意写成**同一轮内的差值**，不比跨轮绝对值 —— 它不是泄漏。两条 NOT_COVERED 也照实记：目录变化通知在部署面上造不出来（控制面只有 GET），`Last-Event-ID` 续传官方 SDK 根本不发 —— 这两维由本地真 socket 层的 `ZMcpSseStreamTest` 钉住，不在本门禁的账上。
+
+
 ## 内置工具与资源
 
 工具：`echo`、`get_time`（`iso` / `epoch` / `iso_local`）、`generate_uuid`、`system_info`。
 资源：`z-mcp://tools`、`z-mcp://servers`、`z-mcp://self` —— 注册表自身可读，声明 `capabilities.resources` 才不是谎报。
+
+这四件加三条资源是 hub 的底盘（`builtin-tools-enabled=true` 时才登记）；`text` / `codec` 两个角色各自的领域工具见「独立进程宿主」。
 
 `get_time` 在 0.1.x 用 `SimpleDateFormat` 打 `Z` 后缀，实际是 JVM 默认时区（声明与行为不符）；现在走 `java.time` 且显式 UTC。
 
@@ -232,14 +368,16 @@ z:
 ## 构建与测试
 
 ```bash
-mvn -B -ntp verify      # JDK 8（基线）或 JDK 17（下游实际运行版本）
+mvn -B -ntp verify      # JDK 8（基线）或 JDK 17（发布给 Boot 3 生态时消费者跑的版本）
 ```
 
-235 个测试（core 175 + starter 53 + admin 7），0 failures、0 skipped；JDK 8 与 JDK 17 各一次 `clean verify` 实测通过。两份日志各自把量具钉在同一处：开头自报 JVM（`openjdk version "1.8.0_482"` / `"17.0.18" 2026-01-20 LTS`）、结尾自报 `exit=0` 与三个被测源码的**跑前/跑后 md5**（相同 ⇒ 量的就是现在这棵树），存在 `~/.cache/zmcp_logs/verify_jdk{8,17}.log`。并发那组不按"跑一次绿"结算：取消的三个类连跑 10 轮 ⇒ 10/10 全绿（`~/.cache/zmcp_logs/repeat/summary.txt`），`HttpJsonRpcExchangeTest` 连跑 15 轮 ⇒ 15/15 全绿且收尾 WARN 0 次（`~/.cache/zmcp_logs/teardown/summary.txt`）。CI 见 `.github/workflows/ci.yml`（JDK 8 + 17 矩阵，每份 job 带 `timeout-minutes: 20`）。
+283 个测试（core 200 + starter 55 + server 21 + admin 7），0 failures、0 skipped；JDK 8 与 JDK 17 各一次 `clean verify` 实测通过（脚本 `~/.cache/zmcp_server_gauges/verify_pair.sh`，日志 `~/.cache/zmcp_server_gauges/pair_jdk{8,17}.log`）。每份日志开头自报 JVM（`openjdk version "1.8.0_482"` / `"17.0.18" 2026-01-20 LTS`）、结尾自报 `exit=0`，并且**每次运行前后各取一枚整树聚合哈希**（仓内所有 `.java` / `.yml` / `pom.xml` 逐个 `md5 -r` 再 `sha256`，压成 16 位）：这一轮（09-26 18:3x，摘要 `~/.cache/zmcp_server_gauges/pair_summary_6.txt`）四枚全是 `3c22289a735f6b15`（上一轮 `1eda79e7ed6a65a7` 是 core 195 / starter 54 那棵树，即 Content-Type 闸进树之前），构建结束后另取一枚现算的仍是同一个值 ⇒ 两个 JDK 量的就是现在这棵树。加这枚哈希是因为上一轮它恰恰不成立 —— `z-mcp-server/pom.xml` 在 15:54 被改过又改回，JDK 8 那次跑在改前、JDK 17 那次跑在改后，两枚"同一条命令同样绿"的日志其实量的不是同一棵树，而 mtime 之外的证据一条都拿不出来（哈希按内容算，改回去就落回同一个值）。这一行的守卫自己也错过一次：先前用 `md5 -q a b c` 存进变量再 `$($M1)` 执行，zsh 不分词 ⇒ 哈希行**静默为空**（看着像"没打印"，不是"对不上"）；现在哈希只由函数现算现打印，不落变量。并发那组不按"跑一次绿"结算：取消这条链上三个类（`McpCancellationTest` + `HttpJsonRpcExchangeTest` + `ZMcpCancellationTest`，JDK 8）连跑 10 轮 ⇒ 10/10 全绿、每轮 tally 都是 core 20 + starter 3，而且**这一支每一轮前后各取一枚整树哈希**（`repeat_cancellation.sh` 打印 `hash=前/后`，本轮 10×2 枚全 `3c22289a735f6b15`，与上面 JDK 那四枚同一值；脚本 `~/.cache/zmcp_logs/repeat_cancellation.sh` → `repeat_cancellation/summary.txt`，09-26 18:24）；`HttpJsonRpcExchangeTest` 单类再连跑 15 轮 ⇒ 15/15 全绿且收尾探针 `WARN z-mcp-test-httpserver-stop` 累计 **0** 次（`~/.cache/zmcp_logs/teardown_loop.sh` → `teardown/summary.txt`，18:25）。**逐轮哈希只有取消那支有** —— `teardown_loop.sh` 只记 rc/tally/warn，它那 15 轮"量的就是这棵树"是靠整个窗口收尾后现算的一枚 `3c22289a735f6b15`（70 文件，与上面 JDK 四枚同一值）兜的，不是逐轮兜的；要把这半句也升成逐轮证据，得把哈希补进那支脚本。这两个循环此前只有输出没有脚本（01:2x 那份 summary 里连"跑的是哪三个类"都没记，core 那格还写着 21 —— 今天按名字重量是 20），所以现在把类名钉进脚本里：**复现不出来的绿不算证据**。CI 见 `.github/workflows/ci.yml`（JDK 8 + 17 矩阵，每份 job 带 `timeout-minutes: 20`；矩阵跑的是整个 reactor，所以 `z-mcp-server` 那 21 条不需要在 CI 里另外登记）。
 
 间歇缺陷不按"跑一次绿"结算。stdio 那一组先前在**同一份代码**上 8 次里挂 2 次（两个不同的竞态），修完按 `for i in 1..12` 复跑 ⇒ 12/12。单次绿只用来发现，不用来定罪也不用来赦免。
 
 发布走 `.github/workflows/publish-central.yml`，**只有推 `v<x.y.z>` 标签（或手动 dispatch 并显式给 version）才会触发**，push 到 main 不发任何东西。版本号先过形状校验再落 `GITHUB_OUTPUT`：通配式 `[0-9]*.[0-9]*.[0-9]*` 的 `*` 会吞掉分号，实测 `0.2.0;rm -rf /` 能蒙过去（而这个值后面要进 URL 和 maven 命令行），所以换成严格的 `x.y.z[-后缀]` 正则；随后拿它探一次 `repo1.maven.org/…/z-mcp-core/<ver>/z-mcp-core-<ver>.pom`，**200 就拒绝发布** —— 中央仓库的坐标是永久占位，抬号是唯一出路（本机实跑这段脚本：`0.1.2` 那支被拦、`0.2.0` 是 404 放行）。credentials 与 GPG 由 `actions/setup-java@v6` 写进 `settings.xml`，口令经 `gpg.passphraseEnvName`（本仓钉 `maven-gpg-plugin` 3.2.7，≥3.2.0 才支持）从环境里取，**不出现在 `mvn` 的 argv 上** —— 同一台 runner 上任何一步 `ps` 都读不到它。
+
+`-pl` 是**白名单**而不是可选优化，这一点用 reactor 顺序量过（本机离线跑 `mvn -B -ntp -o -Pcentral -Drevision=0.0.0-probe validate`，只到 `validate` 为止 —— 不上传、不签名，所以这条测量本身没有发布副作用）。不带 `-pl` 时 reactor 里是六件：`z-mcp`[pom] + `z-mcp-api` / `z-mcp-core` / `z-mcp-admin` / `z-mcp-starter` / **`z-mcp-server`**[jar]；带上 `-pl z-mcp-api,z-mcp-core,z-mcp-starter,z-mcp-admin -am` 之后是五件（四件产物 + 聚合根 pom），`z-mcp-server` 不在表上。为什么这值得钉：根 pom 的 `central` profile 把 source/javadoc/gpg/central-publishing **注进每一个模块**，于是"凡是列进 `<modules>` 的东西自动上中央仓库"，而 `z-mcp-server` 是一枚可执行进程 —— 坐标占位是永久的、没人会 import 它、发上去只是把一个进程伪装成库。新增模块因此默认不进发布名单，要对外发布必须显式加进来。不用 `maven.deploy.skip` 兜这一条：它对 central-publishing 的上传不生效（兄弟仓实测），写了属性却没真的跳过是最难查的那种"发布成功"。
 
 测试刻意不用 mock 打靶：
 
@@ -250,7 +388,7 @@ mvn -B -ntp verify      # JDK 8（基线）或 JDK 17（下游实际运行版本
 * `ZMcpAutoConfigurationTest` 证明配置真的被读取并且真的产生行为（包括异步首连、用户自己的 bean 优先、容器关闭后健康检查线程消失）；
 * `ZMcpHttpEndpointTest` + `ZMcpAdminEndpointTest` 起**真的 Tomcat**（`WebEnvironment.RANDOM_PORT`，测试 scope 里加 `spring-boot-starter-web`）。理由是 `base-path` 与 `expose-admin` 由 Spring 直接绑到 URL 上，`ApplicationContextRunner` 只看得到 bean 在不在、看不到请求进不进得来 —— 而下游接的恰恰是路径。这里验的是：`${base-path}/mcp` 上 `initialize` 能拿到 `Mcp-Session-Id` 而不带前缀的 `/mcp` 是 404；控制面跟着同一个前缀搬（只搬数据面等于把让给遗留模块的 `/mcp` 又自己占回去）；`notifications/initialized` 之前不给工具目录；`Accept` 少了 event-stream 回 406 且响应体仍是 JSON-RPC error；`DELETE` 之后同一个会话 id 立刻失效。
 * `ZMcpListChangedNotificationTest` 钉的是**承诺兑现**那一层：capabilities 里广告了 `listChanged=true` 的三类目录，注册动作要真的变成流上对应那一类的通知 —— 而且只变成那一类。它挂在一个真的 `SseEmitter` 子类上收帧，顺带钉住通知不带 `id` 字段、每条通知各带一个递增的 event id、以及"会话没建流时广播是空操作"。
-* `ZMcpAdminAuthTest` 证的是同一件事的另一半：**配了 token 之后控制面还开不开**。这里有个量具陷阱值得记下来 —— JDK 的 `HttpURLConnection` 把 `Origin` 列为受限请求头、客户端会把它**静默丢掉**，所以第一版用 `TestRestTemplate` 打跨站请求，读到的是"200，闸没生效"（假阴），换成裸 socket 手写请求行才量出真实的 403。同理，带请求体的 POST 撞 401 时 `HttpURLConnection` 会抛 `cannot retry due to server authentication, in streaming mode`（客户端的锅，不是服务端的），对称性探针因此改用无体的 `DELETE`。
+* `ZMcpAdminAuthTest` 证的是同一件事的另一半：**配了 token 之后控制面还开不开**。这里有个量具陷阱值得记下来 —— JDK 的 `HttpURLConnection` 把 `Origin` 列为受限请求头、客户端会把它**静默丢掉**，所以第一版用 `TestRestTemplate` 打跨站请求，读到的是"200，闸没生效"（假阴），换成裸 socket 手写请求行才量出真实的 403。同理，带请求体的 POST 撞 401 时 `HttpURLConnection` 会抛 `cannot retry due to server authentication, in streaming mode`（客户端的锅，不是服务端的），对称性探针因此改用无体的 `DELETE` 与 `GET`。这条探针最初只比**状态码**，所以 401 的挑战头在 `GET`/`DELETE` 那两路整个丢掉时它照样是绿的 —— 现在两扇门三个入口的 `WWW-Authenticate` 值要求逐字相等（见「有意边界」）。
 * `McpSessionStreamBufferTest` 在会话对象这一层量续传的形状：挂一个只记账的 `SseEmitter` 子类，数它按什么顺序拿到哪些帧。它钉住开流的 priming 帧（带 id、`data` 为空、带 `retry`；`retry-ms=0` 时这一条必须不出现）、补发"恰好是漏掉的那些、且一条不重"、续上之后实时事件仍照收、缓冲停在配置值上（内存上界的唯一量具是 `bufferedCount()`）、`buffer-size=0` 时拒续传但流照开、客户端跑到服务端前面时不被赶走、以及一个**并发**性质：广播正好落在 `attach` 中间时要恰好送达一次 —— 那条不靠 sleep 猜时序，而是让记账 emitter 在第一次 `send`（即 priming，跑在临界区内）里放广播进来、并确认它确实被挡在会话锁外（`Thread.State.BLOCKED`），否则这条用例自己就会偶发红。心跳另加四条，全部**直接调 `store.tick()`**（不靠 sleep 猜周期）：一帧 `:keep-alive`、不带 `id` 也不带 `data`、心跳之后第一条真实通知的 id 仍紧接 priming；五拍心跳之后 `bufferedCount()` 仍是那两条、从 `Last-Event-ID: 0` 回来补出的还是 `{"n":1},{"n":2}`；写不出去的流（一个每次都抛 `IOException` 的 `Boom` emitter）被心跳摘掉而活着的继续收；`keep-alive-seconds=0` 时线程数一分不变、配 41 时恰好多一条且重复调用幂等、`close()` 之后那条线程在 5 秒内消失（数线程只认名字前缀 `z-mcp-sse-keepalive-`）。
 * `ZMcpSseKeepAliveTest` 是心跳这一组里**唯一不自己敲 `tick()`** 的一层，因为上面那四条量的是"心跳这件事做对了没有"，量不到"有没有人真的在按周期敲它"：调度器建不起来、开流时没人调用 `startKeepAliveIfNeeded()`、配置没接上 —— 单元层全部照绿，而生产上"安静流被反代的空闲超时掐掉"这个症状会一模一样地回来（注入探针 K5 实测就是这个形状：core 14 条全绿、真 socket 3 条全红）。这一类把 `keep-alive-seconds` 配成 1，然后什么通知都不发，光等线上自己掉帧：安静流上要落下注释帧（`:` 开头、无 `id`、无 `data`），其后第一条真实通知的 id 仍是 `priming+1`；等两拍心跳再断流，用旧位置回来续传仍要补到断流期间那条通知（心跳占号的话这里直接是 `400`）；一条客户端已经跑掉的流不能把另一条的心跳一起带走 —— 这一条读**两拍**不是一拍，因为 `scheduleWithFixedDelay` 在任务抛出异常时是**永久**停摆的，只等一帧的话"整个线程被打死"和"正常"看起来一模一样。
 
@@ -260,6 +398,8 @@ mvn -B -ntp verify      # JDK 8（基线）或 JDK 17（下游实际运行版本
 * `StdioJsonRpcExchangeTest` 为这条路径补了一枚钉子（等子进程回答的中途被中断）：要在传输层就收口成 `IOException`、消息点名 `interrupted while waiting for stdio id=…`、把中断位还回去（`Thread.currentThread().interrupt()` 那句话以前没有任何针看着），并且这一刀之后同一条传输还能答下一个请求。取消把这条路从"只有超时会走"变成了常态。
 
 新写的检查要先证明它会红才算数，所以这些检查是按注入 bug 验收的：把 `@RequestMapping("${z.mcp.base-path:}")` 改成空串 ⇒ 13 条里 12 条红（第 13 条是"控制面默认关"，与前缀无关，本就该绿）；把控制面钉回裸 `/mcp/admin` ⇒ 恰好 5 条红（4 条 socket + 1 条钉注解字符串的单测）；把工具清单的归属字段退回 `null` ⇒ 恰好 1 条红；把控制面上的那道闸拆掉 ⇒ 恰好 4 条红（匿名 401、错 token 401、跨站 Origin 403、数据面/控制面对称），而"好 token 打得开"这条本就该绿，`ZMcpAdminEndpointTest` 那 4 条无 token 用例也全绿 —— 后者同时证明**不配 token 时闸是空操作**，默认行为没被这次改动改掉，13 条数据面用例亦全绿。第一版里"会话不认识 ⇒ 404"这条在前缀被打坏时**仍然绿**，因为路由没命中也是 404 —— 补上响应体必须含 `unknown or expired session` 之后它才真的咬得住。
+
+下面几段里"基线 N 条全绿"（心跳那组 221）是**那一刀当时**的 reactor 总数，不是现在的总数 —— 现在的只认上一节那枚 `pair_summary_5.txt`。保留旧数是因为每一段的红集是按它那次代谢的类集合预测的，换成今天的总数就对不上账；只有 `z-mcp-server` 那一组今天（17:24~17:26）在当前树上重跑过，它的数就是现值。
 
 `listChanged` 那组做了两次**互补**的注入，因为可疑的地方有两层：把 registry 退回"一张监听表、谁变更都惊动所有人" ⇒ 恰好 4 条红（core 1 条 + starter 3 条，"没建流时广播是空操作"本就该绿）；只改接线、让三类都播 `tools/list_changed` ⇒ 恰好 2 条红而 core 那 17 条全绿。分发和接线各被一层单独咬住，任何一层退化都只会红它该红的那几条。这轮探针还顺手暴露了一个没人在乎的常数：`emit` 读的是 `seq.get()`，而声称"单调递增"的 `nextSeq()` 全文零调用点 —— 于是流上每条事件的 SSE id 都停在 0，按 id 去重的客户端会把第二条通知当成第一条的重放丢掉。补上 `nextSeq()` 后，探针复现出的正是 `event id 要递增, 实测 0 -> 0` 这一条红。广告侧另有一层独立的钉子（`advertised_list_changed_flags_are_the_ones_the_server_can_actually_honour`）：以前 `initialize` 的用例只看 `tools` 键在不在，正因如此"广告 true 却没人播报"才得以静悄悄成立。
 
@@ -281,7 +421,16 @@ mvn -B -ntp verify      # JDK 8（基线）或 JDK 17（下游实际运行版本
 
 `id` 显式为 `null` 那一处补了两刀：**N1** 摘掉新加的 null-id 特判、并把 `isNotification` 退回"缺 id 或 id 为 null" ⇒ 恰好 1 条红，正是新用例的第一句（`显式 id:null 不是通知, 必须给回执`，退回来就是 `202` 空体）；**N2** 是钝刀：`isNotification = false` 恒成立 ⇒ 实测 37 条具名红（core 15 + starter 22），远超"至少 2 条"的预期 —— 但预期里那两条都在（`notification_is_accepted_with_202_and_no_body` 红在 202→200，新用例的**正对照半句**红在 `expected:<202> but was:<200>`），多出来的 35 条是同一个依赖：全套件的握手都要发一条 `notifications/initialized`。那半句正对照就是为 N2 这种改法留的 —— 没有它，"把带 method 的一律判成非法请求"也能让第一条断言变绿。
 
+`z-mcp-server` 那 21 条的注入验收是**按配置文件**下的刀（脚本 `~/.cache/zmcp_server_gauges/inject_roles.sh`，日志同目录 `inject/P*.log`），因为这个模块的部署语义全在 YAML 的三行字上，而 YAML 打错一个字符不会有任何编译期信号。下面三档 09-26 17:24~17:26 量过一次（那棵树是 `1eda79e7ed6a65a7`），**18:3x 在当前树（`3c22289a735f6b15`）上重跑一遍，四档读数与具名红集逐条相同**（复量跑在 `~/.cache/zmcp_roles_check` 的隔离副本里：探针要按字节改 `src/main/resources/*.yml`，而共享工作树上正有别的会话在构建，不该留下任何"半套树"的窗口；副本与主树同哈希、四档跑完两侧现算仍是 `3c22289a735f6b15`。日志 `~/.cache/zmcp_server_gauges/inject_roles_tree6/`，包装输出 `~/.cache/zmcp_roles_check/inject_roles_tree6_wrap.log`。这一版下面记的就是复量读数）（基线对照零改动 = 21 条全绿、`exit=0`；上一轮那批读数是 20 条时的，只留了形状没留数）：
+
+* **`bearer-tokens: ${Z_MCP_BEARER_TOKENS:}` 写成 `[""]`**（就是"含一个空串的白名单"，配置面上与"空列表"只差两个引号）⇒ 实测 21 条里红 18：1 条失败 + 17 条错误，红的正是那些不带 token 的握手 —— 也就是说"未设变量 = 门开着"这条默认一旦被换成"门锁死"，**几乎没有任何一条用例能安静地走过去**（本轮只剩 3 条绿的）。这 18 条里 `BearerGateTest.an_unset_token_variable_leaves_the_door_open_instead_of_locking_it_shut` 是唯一以断言失败收场的那一条，它单独就是这条默认的钉子（另外两句 `expected:<[]> but was:<[<blank>]>` 形状的东西都在别的用例的副作用里才显形，所以那一层"绑出来的 List 到底长什么样"的断言不能省）。这一档顺带证明了新加的 `two_hubs_that_aggregate_each_other_reach_a_fixed_point` 不是白搭车的一票：它就在红名单里（`:109`），门一锁死它的两次握手就过不去。
+* **`builtin-tools-enabled: false` 从 text 角色里漏掉** ⇒ 预期 1 条红、实测 6 条：`RolesTest.the_text_role_advertises_exactly_its_own_two_tools` 按预期红在目录形状（叶子开始广告 `echo`/`get_time`/`system_info`），多出的 5 条（2 条 `BearerGateTest` + 3 条 `HubAggregationTest`）是同一个依赖 —— 它们等的是"目录精确等于 6 内置 + 2 上游工具"，叶子多吐 4 条它们就等不到。这一档的账记成"1 + 5 同依赖"，不算 5 枚独立钉子。
+* **`spring.profiles.active` 从 `${Z_MCP_ROLE:hub}` 改成写死 `hub`** ⇒ **注入不出，21 条全绿**。原因不是实现漏了什么，而是**这套测试根本没走那行 YAML**：`Boot.app(...)` 一律在命令行上显式给 `--spring.profiles.active=<role>`，命令行参数优先级高于 yml，所以把 yml 里那行拆掉，单测一条都看不见。真正量到 `Z_MCP_ROLE` 的只有上面那台 fat-jar 冒烟（`The following 1 profile is active: "text"` 那一句），因此"角色靠环境变量选"这件事的证据面是**冒烟脚本而不是测试套件** —— 改了 `application.yml` 的角色默认值，`mvn verify` 不会提醒你，只有真起进程会。要把它拉进套件得让某个用例改成不传 `--spring.profiles.active`、只给环境变量，那是另一层工本，这一版选择写在这里。
+
+三档跑完按字节还原并回读：两枚文件与探针前的 `.bak` md5 逐字相同（脚本自己校验，不一致就当场停），整树聚合哈希回到 `1eda79e7ed6a65a7` —— 与**当时**上面那两次 JDK `clean verify` 前后那四枚同一值 ⇒ 这轮注入没在树上留任何东西（**这三档在 Content-Type 闸进树后（`3c22289a735f6b15`）于隔离副本里复量过一遍，四档读数与具名红集逐条不变**（P0 21 绿 / P1 1 失败+17 错误 / P2 21 绿 / P3 6 条红；P3 那"1 + 5 同依赖"的分解也照旧：`RolesTest.the_text_role…:40` + 2 条 `BearerGateTest` + 3 条 `HubAggregationTest`））。**这一句是 17:25 量的**：中途有一次 `find … | md5 -r | shasum` 打出 `ed0b3a34c7e8ffb6`，那不是树坏了，是 P3 的改动还活着、探针正在跑 —— 判"还原完成"必须在最后一档的 mvn 退出之后取，早取一步就会把在飞状态当成残留（而反向更糟：在飞时看到坏哈希就去改源码，等于改在探针的备份上）。
+
 ## 0.1.x → 0.2.0 迁移
+
 
 破坏性变更集中在"以前没人管、现在按协议办"：
 
@@ -310,12 +459,14 @@ mvn -B -ntp verify      # JDK 8（基线）或 JDK 17（下游实际运行版本
 * 取消是**协作式**的，而且只到这里：服务端做的是 `Future.cancel(true)`，也就是发一次线程中断。工具体如果不理中断（自己吞掉、或正卡在一个不可中断的调用里），它照样会跑完 —— 本层保证的是**那份结果不会再被当成成功发回去**（有测试钉住这一条），不是"工具一定停在原地"。子进程、已发出的远端任务、连接池里的资源不会因此回收，要释放得工具体自己响应中断。
 * 在飞登记只挂在**工具执行**那一段（`tools/call`）。取消一条正在分页的 `tools/list`、或一条已经答完的请求，都是打空 —— 打空按协议静默，不报错。
 * 取消**不向上传播**：如果这次调用的是聚合自上游 MCP server 的工具，本层不会向上游转投一条 `notifications/cancelled`，远端那次调用仍会被它跑完。中断在这里能做到的只有"服务端不再等那份结果"：stdio 那一路的等待是可中断的（立刻以 `IOException` 收口，之后那行响应被当作无人认领丢掉），HTTP 那一路是阻塞的 socket 读、`interrupt` 打不断它，只能等它自己回来。要做真正的端到端取消，得给 `McpRemoteClient`/传输层加一条"转发 cancelled + 让读可中断/可 abort"的路径，这一版没有。
+* 聚合防环有**两层**（见「独立进程宿主」一节末尾）：其一，上游握手回来的 `serverInfo.name` 等于本机 `z.mcp.server-name` 就直接拒（自指/复制品）；其二，不同名的两台 hub 互为上游时靠 `_meta["z-mcp/origins"]` 来源链拒收自己抄出去的那批条目 —— 后者由两个真上下文的六轮不动点用例钉住，不是单测自证，并且 09-26 17:17 起重发的三台真进程上，广告出来的链已实测为 `z-mcp-text,z-mcp` 这一族（见「17:17 重发」一节）。仍然成立的那半句是：来源链是 z-mcp 自己的约定，**第三方 hub 若剥掉 `_meta` 就等于没链可依**，协议里没有 `Max-Forwards` 那一类字段可借。所以"hub 只聚合叶子"仍是推荐的部署口径，但它现在是省心的默认，而不是唯一不长的走法。
 * `session.enabled=false`（无状态模式）下没有可寻址的会话，取消通知因此只能是空操作。
 * `security.bearer-tokens` 为空即完全放开鉴权 —— 只应出现在本机/内网可信环境。
 * 鉴权是**静态 Bearer 白名单**（`security.bearer-tokens`）。协议授权章节里的 OAuth 2.1 那一套（`.well-known` 元数据、动态注册、PKCE、令牌轮换）没有实现 —— 要对外暴露 `/mcp`，请放在做授权的网关后面，别把白名单当账号系统。
-* 闸只有一把：数据面与控制面共用 `TransportSecurityGuard.checkRequest(HttpServletRequest)`，因此配了 `bearer-tokens` 之后 `/mcp/admin/*` 同样 401（带 `WWW-Authenticate`），跨站 Origin 同样 403。0.2.0 之前它只挡 `/mcp`，控制面把上游 endpoint、`lastError`、全部工具 Schema 这些拓扑信息白送给任何能连上端口的人 —— 而配置者以为配了 token 就锁上了。
+* 闸只有一把：数据面、控制面与那台存活探针共用 `TransportSecurityGuard.checkRequest(HttpServletRequest)`，一共五个调用点（`JsonRpcController` 的 `:82` POST / `:237` GET 流 / `:319` DELETE / `:349` `/mcp/info`，加 `AdminController:91` 一处盖住它的五个 mapping），因此配了 `bearer-tokens` 之后 `/mcp/admin/*` 同样 401（带 `WWW-Authenticate`），跨站 Origin 同样 403。0.2.0 之前它只挡 `/mcp`，控制面把上游 endpoint、`lastError`、全部工具 Schema 这些拓扑信息白送给任何能连上端口的人 —— 而配置者以为配了 token 就锁上了。修完控制面之后 `GET /mcp/info` 是**下一个同形的洞**：它报版本号、支持集的协议版本、工具/资源/prompt/会话计数，而它当时不经任何判断（实测匿名请求拿到 200，`Authorization` 与 `Origin` 都不看）。这条的口径是"探针不是白名单的例外"：负载均衡器与监控系统本来就在内网，把 token 配给它和配给 `/mcp` 是同一件事，而"为了探针把某一维放松"正是让闸变成一堆例外的开始。注入验收（`~/.cache/zmcp_guards/mutate_round2.py` 的 S1/S2/S3）：把闸整个摘掉 ⇒ 匿名读到 200，红在第一句；状态码留着、只丢挑战头 ⇒ 红在"挑战形状必须与数据面、控制面同形"那一句（证明这条用例不是只看状态码）；只挡没凭证、放跨站 Origin 过去 ⇒ 红在 403 那一句。
+* 401 的 `WWW-Authenticate` 按 RFC 6750 §3.1 分三种形状：没带凭证 ⇒ `Bearer realm="z-mcp"`（裸挑战，叫客户端去取凭证）；带了 `Authorization` 但读不出令牌（非 Bearer 方案、或只有方案名没有值）⇒ `error="invalid_request"`（请求不成形，重试无意义）；令牌成形但不在白名单 ⇒ `error="invalid_token"`（可以换新令牌再来）。0.2.0 之前三者合成一句 `missing or invalid bearer token` + 一个 `invalid_request`，于是"token 配错了"这种最常见的部署事故会被报成"你请求姿势不对"，客户端的合理反应就变成拿同一份错配置一直重试。三个入口（`POST /mcp`、`GET /mcp` 的流、`DELETE /mcp`）与控制面共用同一个 `denied(v)` 出口 —— 这一维最初是漏的：只有 POST 带挑战，`GET`/`DELETE` 回裸 401，而从流那一路进来的客户端恰恰最需要知道"该怎么带凭证"；`ZMcpAdminAuthTest` 的对称性探针原先只比状态码，所以量不出来。挑战里**不带** `resource_metadata="..."`：那要求本仓真能端出 `/.well-known/oauth-protected-resource`，而静态白名单没有授权服务器可指，指出去就是一个 404 的广告（见上一条边界）。形状本身由 `TransportSecurityGuardAuthTest`（单元）钉，传播由 `JsonRpcControllerTransportTest.every_data_plane_method_carries_the_same_challenge`（三个入口）与 `ZMcpAdminAuthTest`（真容器、两扇门）钉。注入验收：三种形状合回一个值 ⇒ 3 条红；`invalid_request` 换成 `invalid_token` ⇒ 3 条红；空白名单改成"拒绝一切" ⇒ 25 条红；把 `GET`/`DELETE` 的挑战头摘掉 ⇒ 2 条红（controller 与真容器各一条）。
 * 控制面只有 JSON，没有页面。`z-mcp-admin` 里那份 `templates/z-mcp-admin/index.html` 是死资源：没有任何代码引用它，而 Spring Boot 只会自动服务 `static/`（`templates/` 需要模板引擎），所以它连"打开就能看"都做不到。要控制台界面就自己拿 `/mcp/admin/*` 渲染。
-* 下游 z-opc 目前仍 pin 已发布的 `0.1.2` 构件；本仓的改动要经发布 + 下游构建验证才会影响它。
+* 下游 z-opc **目前没有消费本仓的任何构件**。它的两个 pom 里留着 `<z-mcp.version>0.1.2</z-mcp.version>`（根 pom:97、`z-middleware-integration-test/pom.xml:64`），但全仓没有一处声明 `z-mcp-*` 依赖 —— 实测 `grep -rn "artifactId>z-mcp" --include='pom.xml' z-opc` 在 z-opc 里 0 命中；250 上在跑的那个 `z-opc-main-starter-1.0.0-SNAPSHOT-boot.jar`（08-21 构建，473 个内嵌 jar，其中 21 个是本机自建的 `z-*` 构件 —— 这是"文件名里根本没有 groupId，但 `z-` 前缀确实数得见"的阳性对照）里 `BOOT-INF/lib/z-mcp*.jar` 也是 0。z-opc 的 MCP 面是自己那一套 `com.zifang.z.agent.mcp`（`z-agent-mcp-center`，68 个 java 文件），对前端暴露的形状是 `/mcp/server/{list,tools/list,tools/call,test,create,update,delete}`（`z-opc-main-starter-frontend/src/agent/api/routes.js:23-29` 逐条对上），协议版本硬编在 `2024-11-05`（`McpEndpointController.java:135`、`McpAliasController.java:45`）。两件事因此同时成立：**本仓改动不影响任何在跑的东西**（"发布前必须验下游构建"这句目前没有人需要执行），而**工作区里真在用的那个 MCP 实现落后本仓四个 revision**，它需要的形状（上游 server 清单、工具清单、代理调用、连通性测试）本仓已经有一套同域的件（`servers[]` 配置、`McpRemoteClient`、`/mcp/admin/servers`）。把哪一侧并到另一侧是跨仓的架构决定，不在本仓能自己动的范围里。
 
 ## 许可
 

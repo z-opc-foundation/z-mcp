@@ -1,0 +1,14 @@
+# 角色 text: 文本工具叶子服务. 只登记自己的工具, 不聚合任何上游(servers 留空).
+
+server:
+  port: ${Z_MCP_PORT:18096}
+
+z:
+  mcp:
+    server-name: z-mcp-text
+    server-title: 文本工具服务
+    # 叶子服务不注册 echo / get_time / system_info 与自省资源: 它们被 hub 聚合时会撞上
+    # hub 自己的同名工具, 变成 text__echo 这类和真工具混在一张目录里的调试残留.
+    builtin-tools-enabled: false
+    instructions: >-
+      文本统计与命名风格转换, 纯计算, 不访问网络也不读磁盘.

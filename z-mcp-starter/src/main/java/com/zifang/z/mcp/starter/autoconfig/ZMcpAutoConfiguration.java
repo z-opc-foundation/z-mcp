@@ -9,6 +9,8 @@ import com.zifang.z.mcp.core.protocol.McpSchema;
 import com.zifang.z.mcp.core.registry.McpRegistry;
 import com.zifang.z.mcp.core.security.TransportSecurityGuard;
 import com.zifang.z.mcp.core.session.McpSessionStore;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -32,6 +34,8 @@ import org.springframework.context.annotation.Configuration;
 @ComponentScan(basePackages = "com.zifang.z.mcp.core.controller")
 public class ZMcpAutoConfiguration {
 
+    private static final Logger log = LoggerFactory.getLogger(ZMcpAutoConfiguration.class);
+
     @Bean
     @ConditionalOnMissingBean
     public McpRegistry mcpRegistry(McpProperties properties, ObjectMapper mapper) {
@@ -42,7 +46,13 @@ public class ZMcpAutoConfiguration {
         if (manifestVersion != null && manifestVersion.trim().length() > 0) {
             properties.setServerVersion(manifestVersion);
         }
-        BuiltinTools.registerAll(registry, properties, mapper);
+        if (properties.isBuiltinToolsEnabled()) {
+            BuiltinTools.registerAll(registry, properties, mapper);
+        } else {
+            // 关掉之后目录空掉是一种"看起来像装配没生效"的状态, 留一行字给排障的人.
+            log.info("z-mcp builtin tools disabled by z.mcp.builtin-tools-enabled=false;"
+                    + " only tools registered by this application will be advertised");
+        }
         return registry;
     }
 

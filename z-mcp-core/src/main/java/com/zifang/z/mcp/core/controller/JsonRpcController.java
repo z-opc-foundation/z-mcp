@@ -39,7 +39,7 @@ import java.util.Map;
  * <p>DELETE /mcp  — 终止会话.
  *
  * <p>传输层职责(与 {@link McpProtocolHandler} 的方法分发严格分开):
- * Accept 校验(406)、Origin/Host 校验(403)、bearer(401)、限流(429)、
+ * Accept 校验(406)、Content-Type 校验(415)、Origin/Host 校验(403)、bearer(401)、限流(429)、
  * Mcp-Session-Id 生命周期(缺失 400 / 不认识 404)、MCP-Protocol-Version(不支持 400)、
  * JSON 解析失败(-32700)、批量数组体(2025-06-18 起已删除, 回 -32600)、请求体上限(413).
  *
@@ -81,9 +81,7 @@ public class JsonRpcController {
         // 1) 传输安全: Origin / Host / bearer
         TransportSecurityGuard.Violation v = guard.checkRequest(request);
         if (v != null) {
-            ResponseEntity.BodyBuilder b = ResponseEntity.status(v.httpStatus);
-            if (v.wwwAuthenticate != null) b.header(HttpHeaders.WWW_AUTHENTICATE, v.wwwAuthenticate);
-            return b.contentType(MediaType.APPLICATION_JSON).body(errorBody(
+            return denied(v).contentType(MediaType.APPLICATION_JSON).body(errorBody(
                     McpException.INVALID_REQUEST, v.message));
         }
 
@@ -93,6 +91,16 @@ public class JsonRpcController {
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(errorBody(McpException.INVALID_REQUEST,
                             "Accept must include both application/json and text/event-stream"));
+        }
+
+        // 2b) Content-Type: 体是 JSON, 所以只有 application/json 说得通.
+        //     不判它的话 text/plain 的体照样被当 JSON 解析并执行 —— 一个"什么都收"的入口,
+        //     中间件配置错了(典型是网关把请求重写成 form)会在服务端表现为"成功", 没人去查那一层.
+        if (!contentTypeOk(request.getContentType())) {
+            return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(errorBody(McpException.INVALID_REQUEST,
+                            "Content-Type must be application/json"));
         }
 
         // 3) 限流(按会话, 无会话时按来源)
@@ -176,11 +184,18 @@ public class JsonRpcController {
             }
         }
 
-        // 6) 协议版本头: initialize 之后每个请求 MUST 带; 缺失按 2025-03-26 假定
+        // 6) 协议版本头: initialize 之后每个请求都算, 缺失按 2025-03-26 假定
         McpProtocolHandler.RequestContext ctx = new McpProtocolHandler.RequestContext();
         ctx.session = session;
         ctx.remoteAddress = remote(request);
         if (!isInitialize) {
+            if (isUnsupportedVersion(protocolHeader)) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body(errorBody(McpException.UNSUPPORTED_PROTOCOL_VERSION,
+                                "unsupported MCP-Protocol-Version " + protocolHeader
+                                        + ", this server supports " + McpSchema.SUPPORTED_VERSIONS));
+            }
             String declared = protocolHeader != null ? protocolHeader : McpSchema.DEFAULT_ASSUMED;
             if (session != null && session.getProtocolVersion() != null
                     && protocolHeader != null && !protocolHeader.equals(session.getProtocolVersion())) {
@@ -197,12 +212,6 @@ public class JsonRpcController {
         McpProtocolHandler.Reply reply = handler.handle(body, ctx);
 
         if (isInitialize && reply.envelope != null && !reply.envelope.isError()) {
-            if (!McpSchema.isSupported(ctx.negotiatedVersion)) {
-                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .body(errorBody(McpException.UNSUPPORTED_PROTOCOL_VERSION,
-                                "unsupported protocolVersion"));
-            }
             if (properties.getSession().isEnabled()) {
                 String minted = sessions.newSessionId();
                 McpSessionStore.McpSession created = sessions.create(minted, ctx.negotiatedVersion);
@@ -237,7 +246,10 @@ public class JsonRpcController {
     public ResponseEntity<SseEmitter> stream(HttpServletRequest request) {
         TransportSecurityGuard.Violation v = guard.checkRequest(request);
         if (v != null) {
-            return ResponseEntity.status(v.httpStatus).build();
+            return denied(v).build();
+        }
+        if (isUnsupportedVersion(header(request, McpSchema.H_PROTOCOL_VERSION))) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
         }
         if (!acceptsEventStream(header(request, "Accept"))) {
             // 405, 不是 406: 协议在 GET 这一路只点了两个出口 —— 要么 text/event-stream,
@@ -315,7 +327,10 @@ public class JsonRpcController {
     @DeleteMapping("/mcp")
     public ResponseEntity<String> terminate(HttpServletRequest request) {
         TransportSecurityGuard.Violation v = guard.checkRequest(request);
-        if (v != null) return ResponseEntity.status(v.httpStatus).build();
+        if (v != null) return denied(v).build();
+        if (isUnsupportedVersion(header(request, McpSchema.H_PROTOCOL_VERSION))) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
+        }
         if (!properties.getSession().isEnabled()) {
             return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED).build();
         }
@@ -331,9 +346,18 @@ public class JsonRpcController {
 
     // ---------------------------------------------------------------- 内部件
 
-    /** GET /mcp 的只读自检(不经 JSON-RPC): 便于探针/负载均衡器识别端点存活. */
+    /**
+     * {@code GET /mcp/info} 的只读自检(不经 JSON-RPC): 便于探针/负载均衡器识别端点存活.
+     *
+     * <p>它报的是工具/资源/会话计数与服务端版本 —— 拓扑指纹. 0.2.0 收口控制面时闸只装在
+     * {@code z-mcp-admin} 那组映射上, 这条同前缀的路径连请求对象都不接, 于是配了
+     * {@code security.bearer-tokens} 之后它仍对任意来源匿名开放. 现在与另外两扇门共用
+     * {@link TransportSecurityGuard}: 一把闸要么三面都关得一样, 要么等于没关.
+     */
     @GetMapping("/mcp/info")
-    public Map<String, Object> info() {
+    public ResponseEntity<?> info(HttpServletRequest request) {
+        TransportSecurityGuard.Violation v = guard.checkRequest(request);
+        if (v != null) return denied(v).build();
         Map<String, Object> m = new LinkedHashMap<String, Object>();
         m.put("name", properties.getServerName());
         m.put("version", properties.getServerVersion());
@@ -343,11 +367,37 @@ public class JsonRpcController {
         m.put("resources", registry.resourceCount());
         m.put("prompts", registry.promptCount());
         m.put("sessions", sessions.count());
-        return Collections.unmodifiableMap(m);
+        return ResponseEntity.ok((Object) Collections.unmodifiableMap(m));
     }
 
     private ResponseEntity.BodyBuilder okJson() {
         return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON);
+    }
+
+    /**
+     * 客户端在 {@code MCP-Protocol-Version} 里声明的版本是不是我们接不住的.
+     *
+     * <p>不带头是允许的(协议明文要求按 {@link McpSchema#DEFAULT_ASSUMED} 假定, 老客户端就不带),
+     * 而**带了却不支持**必须回 400 —— 静默按自己最高的版本服务, 客户端会以为自己那一路走通了。
+     * 判据放在请求入口而不是握手成功之后: 无状态模式({@code session.enabled=false})根本没有会话,
+     * 挂在"跟协商好的值比对"那一支上就永远轮不到它。POST / GET(流) / DELETE 三个入口共用。
+     */
+    private static boolean isUnsupportedVersion(String protocolHeader) {
+        return protocolHeader != null && !McpSchema.isSupported(protocolHeader);
+    }
+
+    /**
+     * 违规响应. 401 一律带上 {@code WWW-Authenticate}(RFC 6750 要求 401 附挑战,
+     * 而挑战里的 {@code error} 值是给客户端的指令: 去取凭证 / 换令牌再来 / 别重试).
+     *
+     * <p>POST、GET(流)、DELETE 三条路共用这一个出口. 以前只有 POST 带头, 于是同一道闸
+     * 在 {@code GET /mcp} 上回"裸 401" —— 从流那一路进来的客户端拿不到"该怎么带凭证",
+     * 而控制面 {@code /mcp/admin/*} 是带头的, 两扇门形状不一致.
+     */
+    private static ResponseEntity.BodyBuilder denied(TransportSecurityGuard.Violation v) {
+        ResponseEntity.BodyBuilder b = ResponseEntity.status(v.httpStatus);
+        if (v.wwwAuthenticate != null) b.header(HttpHeaders.WWW_AUTHENTICATE, v.wwwAuthenticate);
+        return b;
     }
 
     private String replyBody(McpProtocolHandler.Reply reply) {
@@ -401,6 +451,25 @@ public class JsonRpcController {
         if (accept == null || accept.trim().isEmpty()) return true;
         String a = accept.toLowerCase();
         return a.contains("*/*") || a.contains("text/event-stream");
+    }
+
+    /**
+     * 2025-06-18 "Sending Messages" 第 3 条: POST 体 MUST 是 application/json,
+     * 不支持的 Content-Type MUST 以 415 拒.
+     *
+     * <p>只取第一个媒体类型、剥掉 {@code ;charset=...} 这类参数、大小写不敏感 —— 最后这点比
+     * 参照实现宽松: 官方 python SDK 用 {@code part == "application/json"} 逐字比,
+     * 于是 {@code APPLICATION/JSON} 会被它自己拒掉, 而 RFC 2045 说媒体类型不区分大小写.
+     * 不带 Content-Type 一律拒(HTTP 里它缺省意味着"发送方没声称过任何东西", 这里没有理由替他猜).
+     */
+    static boolean contentTypeOk(String contentType) {
+        if (contentType == null) return false;
+        String first = contentType.split(";", 2)[0].trim().toLowerCase();
+        // 客户端偶尔把多个类型用逗号串成一个头, 参照实现也按逗号再切一次
+        for (String part : first.split(",")) {
+            if (part.trim().equals("application/json")) return true;
+        }
+        return false;
     }
 
     private static String header(HttpServletRequest r, String name) {
