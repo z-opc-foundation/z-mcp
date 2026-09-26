@@ -216,21 +216,45 @@ public class ZMcpSseStreamTest {
         registry.registerResource(new McpResourceDto("z-mcp://sse_probe_down", "sse_probe_down",
                 "d", "text/plain", params -> null));
         try {
-            HttpURLConnection resumed = open(EVENT_STREAM, id, String.valueOf(seen));
-            try {
-                BufferedReader in = reader(resumed);
-                String missed = frame(in);
-                assertTrue("续传要先补上断流期间漏掉的那条: " + show(missed),
-                        missed.contains("notifications/resources/list_changed"));
-                assertEquals("补发的 id 要接在客户端已知的位置后面", seen + 1, eventId(missed));
-                String greeting = frame(in);
-                assertTrue("补完才轮到这条流自己的 priming 帧: " + show(greeting),
-                        greeting.contains("z-mcp stream open"));
-                assertEquals("id 在流上严格递增, 否则客户端会把自己的位置说小",
-                        seen + 2, eventId(greeting));
-            } finally {
-                resumed.disconnect();
+            // 续传这一侧允许被容器切在帧中间: 半截帧不是一个位置, 客户端手里的 `seen` 不动, 于是
+            // 真客户端的做法就是拿同一个 Last-Event-ID 再来一次(CI 上 run 36248206476 的 jdk17 格
+            // 5 轮里 1 次撞上这件事, 而本机 0/2000 撞不上). 重试的是**整对帧** —— 补发与 priming 的
+            // 先后只能在同一条连接上判, 所以任何一帧没读全就整对作废重来。
+            String missed = null, greeting = null;
+            int torn = 0, attempt = 0;
+            while (attempt < 3 && missed == null) {
+                attempt++;
+                HttpURLConnection resumed = open(EVENT_STREAM, id, String.valueOf(seen));
+                try {
+                    BufferedReader in = reader(resumed);
+                    try {
+                        String replayed = frameOrNull(in);
+                        String primed = frameOrNull(in);
+                        missed = replayed;
+                        greeting = primed;
+                    } catch (Torn cut) {
+                        torn++;
+                    }
+                } finally {
+                    resumed.disconnect();
+                }
             }
+            // 切开率不是承诺, 但要留在读数里看得见(与那台压力尺同一个口径)
+            System.out.println("[known-open] 续传整对帧重取: torn=" + torn + " attempts=" + attempt);
+            if (missed == null) {
+                fail("连着三次按 Last-Event-ID=" + seen + " 续传都没拿到完整两帧 —— 这一次是补不上了"
+                        + serverSide());
+            }
+            assertTrue("续传要先补上断流期间漏掉的那条: " + show(missed),
+                    missed.contains("notifications/resources/list_changed"));
+            assertEquals("补发的 id 要接在客户端已知的位置后面", seen + 1, eventId(missed));
+            assertTrue("补完才轮到这条流自己的 priming 帧: " + show(greeting),
+                    greeting.contains("z-mcp stream open"));
+            // 这里原来是逐字相等(seen + 2), 那是"这条流是第一次 attach"的副作用: 每次 attach 的
+            // priming 都要取一个新号, 所以重试一次号就往前跳一格。承诺是"客户端的位置只增不减"
+            // —— 若 priming 复用补发那条的 id, 客户端会把自己的位置说小、下次续传就重收一条。
+            assertTrue("id 在流上严格递增, 否则客户端会把自己的位置说小: " + show(greeting),
+                    eventId(greeting) > eventId(missed));
         } finally {
             registry.unregister("sse_probe_before_drop");
             registry.unregisterResource("z-mcp://sse_probe_down");
@@ -558,6 +582,28 @@ public class ZMcpSseStreamTest {
 
     /** 读到下一个空行为止的一整帧(注释帧以 ':' 开头). */
     private static String frame(BufferedReader in) throws IOException {
+        try {
+            return frameOrNull(in);
+        } catch (Torn t) {
+            // 这一支的原文由 fe95a7a/0da3159 那批注入探针钉着: 摘掉 `+ serverSide()` 就有一条用例
+            // 红在"判红消息得把服务端同期的话带出来"。Premature EOF 是 IOException 而不是"读到
+            // null", 以前它会直接逃出 frame(), 于是 CI 的红只剩一句症状、没有归因。
+            fail(t.readSoFar() + serverSide());
+            return null;
+        }
+    }
+
+    /**
+     * 与 {@link #frame} 同一种读法, 但对端在帧中间撒手时把 {@link Torn} 交回调用方, 而不是当场判红。
+     *
+     * <p>"补发那一帧被容器切在中间"不是我们那条承诺被违了 —— 它是 CI 负载下的既有事实(本机 2000 轮
+     * 0 次, run {@code 36248206476} 的 jdk17 格 5 轮里 1 次), 而半截帧不构成一个位置: 客户端的正确
+     * 做法恰恰是拿同一个 {@code Last-Event-ID} 再来一次。代价要写清楚 —— 这一路重试在**安静的本机
+     * 上一次都触发不了**, 所以它的牙不在这个类, 在 {@code ZMcpSseAbandonResumeStressTest} 那条把
+     * "切在帧中"做成确定动作的用例里; 而调用方耗尽重试之后必须**自己**把 {@code serverSide()} 接上,
+     * 否则"红消息要带服务端的话"那半守卫就管不到这条路。
+     */
+    private static String frameOrNull(BufferedReader in) throws IOException {
         StringBuilder frame = new StringBuilder();
         String line;
         try {
@@ -570,13 +616,19 @@ public class ZMcpSseStreamTest {
                 frame.append(line);
             }
         } catch (SocketTimeoutException e) {
-            fail("15 秒内流上没有帧(已读到: " + frame + ")" + serverSide());
+            throw new Torn("15 秒内流上没有帧(已读到: " + frame + ")", e);
         } catch (IOException e) {
-            // Premature EOF 走这一支: 它是 IOException 而不是"读到 null", 以前会直接逃出 frame(),
-            // 于是 CI 的红只剩一句症状。带着服务端同期的话判红, 才知道该往哪边查。
-            fail(e + "(已读到: " + frame + ")" + serverSide());
+            throw new Torn(e + "(已读到: " + frame + ")", e);
         }
-        fail("流在帧完整之前就结束了(已读到: " + frame + ")" + serverSide());
-        return frame.toString();
+        throw new Torn("流在帧完整之前就结束了(已读到: " + frame + ")", null);
+    }
+
+    /** 一条没读完整的帧: 消息里已经带着读到的那半截, 供调用方重试或最终判红时原样转出去. */
+    private static final class Torn extends IOException {
+        Torn(String readSoFar, Throwable cause) {
+            super(readSoFar, cause);
+        }
+
+        String readSoFar() { return getMessage(); }
     }
 }

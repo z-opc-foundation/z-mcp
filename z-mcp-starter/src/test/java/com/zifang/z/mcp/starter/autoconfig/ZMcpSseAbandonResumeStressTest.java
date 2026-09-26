@@ -66,7 +66,8 @@ import static org.junit.Assert.assertTrue;
                 "z.mcp.sse.timeout-ms=15000",
                 "z.mcp.sse.keep-alive-seconds=0",
                 "z.mcp.sse.buffer-size=64",
-                // 这台尺量的是"帧有没有被切开", 不是限流; 一轮四五个请求, 300/min 默认值会先撞墙
+                // 这台尺硬断的是"不丢事件", 切开率只是它顺手打印的读数; 两者都不是限流的事,
+                // 而一轮四五个请求会先撞上 300/min 的默认值, 所以这里把限流关掉
                 "z.mcp.rate-limit.enabled=false"
         })
 public class ZMcpSseAbandonResumeStressTest {
