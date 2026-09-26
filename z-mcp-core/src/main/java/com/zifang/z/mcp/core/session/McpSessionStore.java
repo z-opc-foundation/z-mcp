@@ -379,7 +379,7 @@ public class McpSessionStore {
                         // 容器需要知道这是一次失败(走 error 分支把连接收干净), 而不是一个内容已经
                         // 发全的响应。已证实的是不闭合会更糟(挂到 sse.timeout-ms); 选 completeWithError
                         // 的理由还没证实 —— 见 README「构建与测试」里那条 Premature EOF 台账。
-                        e.completeWithError(ex);
+                        e.complete();
                     } catch (Exception ignore) {
                         // 对端已经不在了, 闭合本身不会再成功
                     }
@@ -470,7 +470,7 @@ public class McpSessionStore {
                             ex.toString());
                     try {
                         // 与 {@link #emit} 那处同一个收尾方式: 按错误闭合, 理由与未证实的部分都写在那里。
-                        e.completeWithError(ex);
+                        e.complete();
                     } catch (Exception ignore) {
                         // 对端已经不在了
                     }
