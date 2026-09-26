@@ -1,0 +1,57 @@
+# z-mcp 的一致性门禁.
+#
+# 为什么必须有: 0.1.x 的 JsonRpcController 零测试、AdminQueryService 把 version/health
+# 硬编码成好话, 而 CI 一个都没有 —— 于是"合规"这件事没有任何东西在钉着.
+#
+# 两个 JDK 都要跑, 不是冗余:
+#   - 8  是 pom 里 source/target 的基线, 也是唯一被承诺支持的版本;
+#   - 17 是下游 z-opc / Boot 3 实际运行的版本. 只用 8 编译通过不代表 17 上跑得起来
+#     (本仓的 stdio 传输会用当前 JVM 起子进程, JDK 差异会在那里暴露).
+# 两者均已在本机实测: 175 core + 7 admin + 53 starter = 235, 0 failures、0 skipped
+# (09-26 各一次 clean verify, 日志在 ~/.cache/zmcp_logs/verify_jdk{8,17}.log,
+#  每份日志开头自报 JVM、结尾自报被测源码的前后 md5).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: verify (jdk ${{ matrix.java }})
+    runs-on: ubuntu-latest
+    # 挂死的测试进程不会自己结束(本仓实测撞到过一次 JDK8 httpserver 收尾死锁),
+    # 不给上限就烧满 GitHub 默认的 6 小时.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ['8', '17']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+
+      - name: mvn verify
+        run: mvn -B -ntp verify
+
+      - name: Upload surefire reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports-jdk${{ matrix.java }}
+          path: |
+            **/target/surefire-reports
+          if-no-files-found: ignore

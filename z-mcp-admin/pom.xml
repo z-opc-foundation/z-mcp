@@ -16,7 +16,7 @@
     <packaging>jar</packaging>
 
     <name>z-mcp-admin</name>
-    <description>控制面 REST + 内置 HTML (servers/tools/health 视图)</description>
+    <description>控制面 REST (servers/tools/health 视图)，挂载在 ${z.mcp.base-path}/mcp/admin/*</description>
 
     <properties>
         <maven.compiler.source>8</maven.compiler.source>
@@ -29,6 +29,23 @@
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-mcp-core</artifactId>
             <version>${revision}</version>
+        </dependency>
+
+        <!--
+          AdminController 要读 Origin/Host/Authorization 三个头, 与数据面共用同一把安全闸.
+          与 z-mcp-core 一样按 provided 依赖: 运行时由容器提供.
+        -->
+        <dependency>
+            <groupId>javax.servlet</groupId>
+            <artifactId>javax.servlet-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- 控制面报出去的每一个字段都要有测试钉住: 0.1.x 的 version/health 都是硬编码好话 -->
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>

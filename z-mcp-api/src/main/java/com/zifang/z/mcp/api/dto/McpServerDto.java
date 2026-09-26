@@ -6,14 +6,15 @@ import java.util.List;
  * MCP server 注册条目(API 层 DTO).
  *
  * <p>name: server 唯一名(如 "filesystem" / "github").
- * <p>endpoint: JSON-RPC 入口(stdio / ws / http).
+ * <p>endpoint: JSON-RPC 入口(stdio 传输下是命令行的可读表示).
  * <p>tools: server 提供的工具列表.
  */
 public final class McpServerDto {
 
     private final String name;
     private final String endpoint;
-    private final String transport; // "stdio" / "websocket" / "http+sse"
+    /** 配置里写的原值: http / streamable-http / http+json / stdio. websocket 与已废弃的 http+sse 不会被接进来. */
+    private final String transport;
     private final List<McpToolDto> tools;
 
     public McpServerDto(String name, String endpoint, String transport, List<McpToolDto> tools) {

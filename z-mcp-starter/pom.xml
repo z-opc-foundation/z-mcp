@@ -31,14 +31,43 @@
             <version>${revision}</version>
         </dependency>
 
+        <!--
+          控制面必须真的在 classpath 上, @ComponentScan("com.zifang.z.mcp.admin") 才扫得到东西.
+          0.1.x 到 0.2.0 之间没有任何 pom 依赖过 z-mcp-admin, 于是 z.mcp.expose-admin=true
+          扫的是一个不存在的包 ⇒ 静默什么都不挂载, 开关等于没有.
+        -->
+        <dependency>
+            <groupId>io.github.yuku123</groupId>
+            <artifactId>z-mcp-admin</artifactId>
+            <version>${revision}</version>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-autoconfigure</artifactId>
         </dependency>
 
+        <!-- 装配要扫到 JsonRpcController, 它的签名里有 servlet 类型; 运行时由容器提供 -->
+        <dependency>
+            <groupId>javax.servlet</groupId>
+            <artifactId>javax.servlet-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
         <dependency>
             <groupId>junit</groupId>
             <artifactId>junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+          ZMcpHttpEndpointTest 要起真 Tomcat: base-path / expose-admin 是"Spring 自己绑定"的两个字段,
+          ApplicationContextRunner 只能验到 bean 在不在, 验不到 URL 到底挂在哪个路径上 ——
+          而下游接的恰恰是路径. 只在 test scope, 不把 servlet 容器强加给引 starter 的业务系统.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

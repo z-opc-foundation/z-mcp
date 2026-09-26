@@ -1,0 +1,78 @@
+# 发布到 Maven Central: 打 v* 标签即发 (与 z-boot / z-script / z-mist 同一条流水线形状).
+#
+# 注意 deploy 是 -DskipTests 的: 测试由 ci.yml 在每个 push 上跑, 这里只负责签名+部署.
+# 但发布前的版本一致性由 -Drevision 从标签解析, 不再手填 pom, 避免出现"标签 0.2.1、
+# 产物 0.2.0"这种在中央仓库无法撤销的错版本.
+
+name: publish-maven-central
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  JAVA_VERSION: '8'
+
+jobs:
+  publish:
+    name: Build + Sign + Deploy to Maven Central
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Import GPG private key
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Resolve revision from tag
+        id: rev
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VER="${TAG#v}"
+          echo "revision=${VER}" >> "$GITHUB_OUTPUT"
+          echo "Resolved revision from tag ${TAG}: ${VER}"
+
+      - name: Set Maven Central Token (User Token from https://central.sonatype.com/account)
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<EOF
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
+            <servers>
+              <server>
+                <id>central</id>
+                <username>${CENTRAL_USERNAME}</username>
+                <password>${CENTRAL_TOKEN}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
+
+      - name: mvn deploy -Pcentral
+        run: |
+          mvn -B -ntp deploy -Pcentral -DskipTests \
+              -Dgpg.passphrase="${{ secrets.GPG_PASSPHRASE }}" \
+              -Drevision="${{ steps.rev.outputs.revision }}"
+
+      - name: Verify deployment
+        if: success()
+        run: |
+          echo "✅ Published. Verify at: https://central.sonatype.com/artifact/io.github.yuku123/z-mcp-starter"

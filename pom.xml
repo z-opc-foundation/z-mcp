@@ -6,11 +6,14 @@
 
     <!--
         z-mcp: MCP (Model Context Protocol) 工具/服务注册中心.
-        - api: 零依赖 DTO + exception
-        - core: McpRegistry + McpServer + McpClient + HTTP/JSON-RPC 网关
+        - api:     零依赖 DTO + exception(自己产出线格式视图)
+        - core:    McpRegistry + 协议层(McpProtocolHandler) + Streamable HTTP/stdio 双向传输
         - starter: Spring Boot 自动装配
-        - admin: 控制面 (vendors/servers/tools/health 视图)
-        依赖 kernel.mcp SPI + kernel.message + kernel.types + z-mist(可选)
+        - admin:   控制面 (servers/tools/health 视图)
+
+        依赖面刻意收在 Spring Boot 2.7 + Jackson + SLF4J:
+        - 不用官方 MCP Java SDK —— 它要求 Java 17 + Reactor, 本仓编译目标是 Java 8
+        - 不依赖 z-agent-kernel —— 基建模块不能反向依赖应用层(0.1.x 那 4 个 kernel 依赖无人 import)
     -->
 
     <groupId>io.github.yuku123</groupId>
@@ -19,7 +22,7 @@
     <packaging>pom</packaging>
 
     <name>z-mcp (MCP Tool &amp; Service Registry)</name>
-    <description>MCP 协议桥接中心: 内置工具注册 + 多协议服务发现 + LLM tools 字段聚合</description>
+    <description>MCP 协议网关与注册中心: 内置工具 + 上游 server 聚合(http/stdio) + 一致性门禁</description>
     <url>https://github.com/z-opc-foundation/z-mcp</url>
 
     <licenses>
@@ -57,13 +60,12 @@
     </modules>
 
     <properties>
-        <revision>0.1.2</revision>
+        <revision>0.2.0</revision>
         <maven.compiler.source>8</maven.compiler.source>
         <maven.compiler.target>8</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
         <spring-boot.version>2.7.18</spring-boot.version>
-        <z-agent-kernel.version>0.1.0</z-agent-kernel.version>
     </properties>
 
     <dependencyManagement>
@@ -76,27 +78,6 @@
                 <scope>import</scope>
             </dependency>
 
-            <!-- z-agent-kernel SPI 子模块 -->
-            <dependency>
-                <groupId>io.github.yuku123</groupId>
-                <artifactId>z-agent-kernel-mcp</artifactId>
-                <version>${z-agent-kernel.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>io.github.yuku123</groupId>
-                <artifactId>z-agent-kernel-message</artifactId>
-                <version>${z-agent-kernel.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>io.github.yuku123</groupId>
-                <artifactId>z-agent-kernel-types</artifactId>
-                <version>${z-agent-kernel.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>io.github.yuku123</groupId>
-                <artifactId>z-agent-kernel-tool</artifactId>
-                <version>${z-agent-kernel.version}</version>
-            </dependency>
         </dependencies>
     </dependencyManagement>
 
