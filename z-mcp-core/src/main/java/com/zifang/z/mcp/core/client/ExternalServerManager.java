@@ -53,6 +53,13 @@ public class ExternalServerManager {
     private final ExchangeFactory factory;
     private final Map<String, Managed> managed = new LinkedHashMap<String, Managed>();
     private ScheduledExecutorService scheduler;
+    /**
+     * {@link #destroy()} 是终点, 不是"暂时停一下". 首轮同步跑在守护线程里, 它完全可能在
+     * 容器已经关闭之后才抢到这把锁 —— 而 {@code scheduler = null} 会把
+     * {@link #startSchedulerIfNeeded()} 的门重新打开, 于是**已经死了的 bean** 会再起一个
+     * 没人负责关掉的周期线程(同 JVM 里每关启一次就漏一条)。
+     */
+    private boolean destroyed;
 
     public ExternalServerManager(McpRegistry registry, McpProperties properties, ObjectMapper mapper) {
         this(registry, properties, mapper, defaultFactory(properties, mapper));
