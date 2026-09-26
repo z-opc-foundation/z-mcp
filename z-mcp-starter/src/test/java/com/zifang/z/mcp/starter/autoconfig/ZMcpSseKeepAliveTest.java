@@ -1,5 +1,7 @@
 package com.zifang.z.mcp.starter.autoconfig;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.LoggerContext;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
@@ -84,18 +86,34 @@ public class ZMcpSseKeepAliveTest {
      */
     private static final ListAppender<ILoggingEvent> SERVER_SIDE = new ListAppender<ILoggingEvent>();
 
+    /** 装 appender 之前这两个 logger 各自的级别, {@code @After} 原样还回去. */
+    private static Level previousStoreLevel;
+    private static Level previousControllerLevel;
+
     @Before public void watchServerSideDecisions() {
         LoggerContext ctx = (LoggerContext) LoggerFactory.getILoggerFactory();
+        Logger store = ctx.getLogger(McpSessionStore.class.getName());
+        Logger controller = ctx.getLogger(JsonRpcController.class.getName());
+        // 级别也得在用法里钉死: 判据是"日志里要有这句话", 不能跟着环境的有效级别漂 ——
+        // 本项目已经有过两次"本机全绿而 CI 红"是量具随环境变的教训.
+        previousStoreLevel = store.getLevel();
+        previousControllerLevel = controller.getLevel();
+        store.setLevel(Level.DEBUG);
+        controller.setLevel(Level.DEBUG);
         SERVER_SIDE.start();
-        ctx.getLogger(McpSessionStore.class.getName()).addAppender(SERVER_SIDE);
-        ctx.getLogger(JsonRpcController.class.getName()).addAppender(SERVER_SIDE);
+        store.addAppender(SERVER_SIDE);
+        controller.addAppender(SERVER_SIDE);
     }
 
     /** 摘干净: 下一个用例若也挂一遍, 不该读到本用例留下的行; 别处的用例也不该被这个 appender 拖累. */
     @After public void stopWatchingServerSideDecisions() {
         LoggerContext ctx = (LoggerContext) LoggerFactory.getILoggerFactory();
-        ctx.getLogger(McpSessionStore.class.getName()).detachAppender(SERVER_SIDE);
-        ctx.getLogger(JsonRpcController.class.getName()).detachAppender(SERVER_SIDE);
+        Logger store = ctx.getLogger(McpSessionStore.class.getName());
+        Logger controller = ctx.getLogger(JsonRpcController.class.getName());
+        store.detachAppender(SERVER_SIDE);
+        controller.detachAppender(SERVER_SIDE);
+        store.setLevel(previousStoreLevel);
+        controller.setLevel(previousControllerLevel);
         SERVER_SIDE.stop();
         SERVER_SIDE.list.clear();
     }
@@ -148,6 +166,40 @@ public class ZMcpSseKeepAliveTest {
         } finally {
             stream.disconnect();
             terminate(id);
+        }
+    }
+
+    /**
+     * 服务端自己把一条流收掉时, 要留下一行"是我关的", 而且这行话要能跟着判红一起被看见.
+     *
+     * <p>客户端在这之后读到的是"流提前结束", 与中间层把连接掐了是同一种症状。CI 上真出现过一次这种红
+     * ({@code heartbeats_do_not_move_the_position_a_client_resumes_from} 报 {@code Premature EOF}),
+     * 当时服务端四条会结束流的出口全是静默的, 于是"谁收的尾"没有任何线索。本用例把两半一起钉住:
+     * {@link #frame} 判红时要把服务端同期的话带进消息, 以及会话被终止时服务端确实说了那句话.
+     */
+    @Test
+    public void a_stream_the_server_ends_out_loud_says_so() throws Exception {
+        String id = handshake();
+        HttpURLConnection stream = open(EVENT_STREAM, id);
+        BufferedReader in = reader(stream);
+        try {
+            eventId(frame(in));
+            terminate(id);
+            // 终止之后不该再有帧掉到这条流上, 但"terminate 之前已经写进 socket 的那一帧"是允许的,
+            // 所以这里最多读三帧 —— 三帧之内必须看到这条流结束(不赌 terminate 与 tick 的先后).
+            for (int i = 0; i < 3; i++) {
+                try {
+                    frame(in);
+                } catch (AssertionError red) {
+                    String message = String.valueOf(red.getMessage());
+                    assertTrue("判红消息里要带服务端同期说的话(含会话 id), 否则客户端的症状归不到服务端: "
+                                    + message, message.contains(id));
+                    return;
+                }
+            }
+            fail("会话已经终止, 这条流却还在给出帧");
+        } finally {
+            stream.disconnect();
         }
     }
 

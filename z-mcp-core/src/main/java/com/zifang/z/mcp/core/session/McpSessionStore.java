@@ -477,6 +477,12 @@ public class McpSessionStore {
         void closeEmitters() {
             List<SseEmitter> copy;
             synchronized (emitters) { copy = new ArrayList<SseEmitter>(emitters); emitters.clear(); }
+            if (!copy.isEmpty()) {
+                // 服务端主动收尾, 在客户端那一侧只表现为"流提前结束了", 与"网络把流掐了"是同一种症状。
+                // 不留这一行, 排障的人就没法把"会话被终止/被回收"和"中间层掉了"分开(实测: 终止会话
+                // 之后客户端 readLine 直接读到 null, 而当时服务端一个字都没说)。
+                log.info("session {} closed {} SSE stream(s)", id, Integer.valueOf(copy.size()));
+            }
             for (SseEmitter e : copy) {
                 try {
                     e.complete();
