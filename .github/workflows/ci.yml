@@ -9,13 +9,10 @@
 #     注意它**不是**"本机下游的实际版本" —— 实测 250 上在跑的两台 host JVM 都是 1.8.0_362,
 #     而 z-opc 根本没有依赖本仓(见 README 有意边界), 所以这一格守的是未来, 不是现状。
 #     只用 8 编译通过不代表 17 上跑得起来(本仓的 stdio 传输会用当前 JVM 起子进程, JDK 差异会在那里暴露)。
-# 两者均已在本机实测: 195 core + 54 starter + 21 server + 7 admin = 277, 0 failures、0 skipped
-# (各一次 clean verify, 日志在 ~/.cache/zmcp_server_gauges/pair_jdk{8,17}.log,
-#  每份日志开头自报 JVM、结尾自报 exit=0, 且每次运行前后各有一枚整树聚合哈希 —— 四枚一致。
-#  哈希的**值**与跑的时刻都不写在这里: 这行注释本身是被哈希的 .yml 之一, 写死就永远对不上;
-#  时刻与哈希记在日志里, README 的"构建与测试"一节抄同一份日志。)
-# 矩阵跑的是整个 reactor, 所以新增模块(含 z-mcp-server)不需要在这里另外登记 —— 但反过来说,
-# 这句注释里的数字**不会**自己跟着涨, 加了模块记得改它。
+#
+# 每格跑了多少条**不写在这里**: 这段注释所在的文件本身在整树哈希的集合里, 写死数字就永远对不上,
+# 而且它不会自己跟着涨(本仓有过一次"注释还写着 277, 实际 283")。真实读数由 tools/ci-tally.py
+# 打印并写进 job summary, 四格缺一格当场判红; README 的"构建与测试"一节抄同一份日志。
 
 name: ci
 
@@ -54,7 +51,19 @@ jobs:
           cache: maven
 
       - name: mvn verify
-        run: mvn -B -ntp verify
+        # -Dmaven.test.failure.ignore=true **不是放宽门禁**, 是把门禁挪到下一步: Maven 默认
+        # fail-fast, 第一个模块一红, 它下游的模块一条都不跑(-fae 也救不了, 它恰恰跳过依赖失败
+        # 模块的那些)。于是红消息里分不清"下游也通过了"和"下游根本没测"—— run 36237383572 里
+        # z-mcp-server 那格就是这么消失的。四格全跑完再统一判, 由 tools/ci-tally.py 负责红。
+        run: mvn -B -ntp verify -Dmaven.test.failure.ignore=true
+
+      # 真正的门禁在这里: 它按根 pom 的 <modules> 现算"该有哪几格", 缺格 / 空报告 / skipped>0
+      # 一律判红, 顺带把按模块的 tally 写进 job summary(读数不抄进任何被哈希的文件)。
+      - name: surefire tally (缺格即红)
+        # always(): mvn 那一步因为**编译**失败而中止时, 也要能看到"哪几格根本没跑" —— 那正是
+        # fail-fast 藏起来的那半张脸。
+        if: always()
+        run: python3 tools/ci-tally.py
 
       - name: Upload surefire reports
         if: failure()

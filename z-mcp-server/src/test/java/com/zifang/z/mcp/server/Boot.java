@@ -19,13 +19,22 @@ final class Boot {
 
     static ConfigurableApplicationContext app(String... overrides) {
         List<String> args = new ArrayList<String>(Arrays.asList(overrides));
+        boolean port = false;
+        boolean address = false;
+        for (String a : args) {
+            if (a.startsWith("--server.port=")) port = true;
+            else if (a.startsWith("--server.address=")) address = true;
+        }
         // 端口 0 而不是 yml 里的 18095/18096/18097: 测试不能赌这台机器上谁占着哪个端口,
         // 也不能因为别人在跑同一套服务就红. 命令行参数是覆盖 yml 的唯一可靠通道.
-        // 但调用方自己钉了端口就不能再补一个 —— 两个同名命令行参数会被绑成 "1234,0" 而启动失败.
-        for (String a : args) {
-            if (a.startsWith("--server.port=")) return run(args);
-        }
-        args.add("--server.port=0");
+        // 但调用方自己钉了就不能再补一个 —— 两个同名命令行参数会被绑成 "1234,0" 而启动失败.
+        if (!port) args.add("--server.port=0");
+        // 绑死回环, 不许绑通配 —— "OS 把这个端口给了我" 和 "打到这个端口的流量归我" 是两件事。
+        // 本机实测: 另一个进程先绑了 127.0.0.1:P, 我们的 Tomcat 再绑 *:P 仍然"成功"并打出
+        // `Tomcat started on port(s): P`, 但内核把 127.0.0.1:P 的流量交给那个更具体的绑定,
+        // 于是客户端读到的是**别人的** `404 No context found for request`, 在用例里长得像
+        // "应用没挂 /mcp". Linux(实测 250/4.15)直接在 bind 上回 EADDRINUSE, 所以这条只在 mac 上要命。
+        if (!address) args.add("--server.address=127.0.0.1");
         return run(args);
     }
 
