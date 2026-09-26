@@ -35,10 +35,13 @@ jobs:
       matrix:
         java: ['8', '17']
     steps:
-      - uses: actions/checkout@v4
+      # v4 时代跑在 Node 20 上, GitHub 已经发弃用公告(强制挪到 Node 24 并每次跑刷两条
+      # annotation); checkout@v7 / setup-java@v6 / upload-artifact@v7 是 node24 的原生版本,
+      # setup-java v1–v4 官方文档明确"deprecated, 不再收更新".
+      - uses: actions/checkout@v7
 
       - name: Set up JDK ${{ matrix.java }}
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: ${{ matrix.java }}
@@ -49,7 +52,7 @@ jobs:
 
       - name: Upload surefire reports
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: surefire-reports-jdk${{ matrix.java }}
           path: |

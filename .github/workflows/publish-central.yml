@@ -1,8 +1,18 @@
-# 发布到 Maven Central: 打 v* 标签即发 (与 z-boot / z-script / z-mist 同一条流水线形状).
+# 发布到 Maven Central: 打 v<x.y.z> 标签即发 (骨架与 z-boot / z-script / z-mist 同一条流水线形状,
+# 但这一份 09-26 起走在前面两处: credentials 交给 setup-java@v6 而不是手写 settings.xml、
+# 版本号先校验形状再探一次 repo1 占位。别照旧的兄弟仓版本往回改)。
 #
-# 注意 deploy 是 -DskipTests 的: 测试由 ci.yml 在每个 push 上跑, 这里只负责签名+部署.
-# 但发布前的版本一致性由 -Drevision 从标签解析, 不再手填 pom, 避免出现"标签 0.2.1、
-# 产物 0.2.0"这种在中央仓库无法撤销的错版本.
+# deploy 是 -DskipTests 的: 测试由 ci.yml 在每个 push 上跑, 这里只负责签名 + 部署.
+# 版本号从标签解析、不手填 pom, 避免出现"标签 0.2.1、产物 0.2.0"这种在中央仓库无法撤销的错版本;
+# 下面 resolve-revision 一步把这句话真的执行了(校验 v<x.y.z> 形状 + 拒绝已占位的版本),
+# 因为中央仓库的坐标一旦占了就永久占位, 错一次没有回头路.
+#
+# credentials 与 GPG 都交给 actions/setup-java@v6 自己写 settings.xml:
+# 它走 maven-gpg-plugin 的 gpg.passphraseEnvName(需 >= 3.2.0, 本仓 central profile 钉 3.2.7),
+# 只把"存口令的环境变量名"交给 maven, 口令本身留在进程环境里. 之前那行
+# `-Dgpg.passphrase="${{ secrets.GPG_PASSPHRASE }}"` 会出现在 mvn 拉起的 java 进程 argv 上,
+# 同一 runner 上任何一步 `ps` 都读得到, 也是 Actions 官方点名要避免的写法.
+# GPG_PRIVATE_KEY 需 ASCII-armored: `gpg --armor --export-secret-keys <KEYID>`.
 
 name: publish-maven-central
 
@@ -11,6 +21,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: '要发布的版本号, 例如 0.2.0; 留空则从触发的标签解析'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -18,61 +33,85 @@ permissions:
 
 env:
   JAVA_VERSION: '8'
+  # 本仓在 Central 上的坐标前缀, 用于发布前的"这个版本是不是已经被占了"检查.
+  GROUP_PATH: io/github/yuku123
+  ARTIFACT: z-mcp-core
 
 jobs:
   publish:
     name: Build + Sign + Deploy to Maven Central
     runs-on: ubuntu-latest
+    # 发布卡在半路(比如签名等 pinentry)不会自己结束; 不给上限就烧满默认 6 小时.
+    timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up JDK ${{ env.JAVA_VERSION }}
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-          cache: maven
-
-      - name: Import GPG private key
-        uses: crazy-max/ghaction-import-gpg@v6
-        with:
-          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+        uses: actions/checkout@v7
 
       - name: Resolve revision from tag
         id: rev
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          VER="${TAG#v}"
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            VER="$INPUT_VERSION"
+            SRC="workflow_dispatch input"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+            case "$TAG" in
+              v[0-9]*) ;;
+              *) echo "::error::ref '$TAG' 不是 v<x.y.z> 形式的标签; 要手工触发请在 workflow_dispatch 里显式给 version"; exit 1 ;;
+            esac
+            VER="${TAG#v}"
+            SRC="tag $TAG"
+          fi
+          # 只放行 x.y.z 或 x.y.z-后缀: 通配式 ([0-9]*.[0-9]*.[0-9]*) 的 * 会吞掉分号和空格,
+          # 实测 "0.2.0;rm -rf /" 能蒙过它, 而这个值要进 URL 和 maven 命令行.
+          if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.][0-9A-Za-z]+)*)?$ ]]; then
+            echo "::error::从 ${SRC} 解析出的版本 '$VER' 不是 x.y.z[-后缀], 拒绝发布"; exit 1
+          fi
+          echo "Resolved revision from ${SRC}: ${VER}"
           echo "revision=${VER}" >> "$GITHUB_OUTPUT"
-          echo "Resolved revision from tag ${TAG}: ${VER}"
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
 
-      - name: Set Maven Central Token (User Token from https://central.sonatype.com/account)
+      - name: Refuse a version whose coordinates are already taken
+        # 中央仓库的坐标是永久占位: 同版本号重发要么 409 卡死、要么留下半套产物.
+        # 这里只在"确实查到已发布"时拦; 查不到(404)放行, 网络本身出问题时不冤枉拦.
         run: |
-          mkdir -p ~/.m2
-          cat > ~/.m2/settings.xml <<EOF
-          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
-            <servers>
-              <server>
-                <id>central</id>
-                <username>${CENTRAL_USERNAME}</username>
-                <password>${CENTRAL_TOKEN}</password>
-              </server>
-            </servers>
-          </settings>
-          EOF
+          url="https://repo1.maven.org/maven2/${GROUP_PATH}/${ARTIFACT}/${REVISION}/${ARTIFACT}-${REVISION}.pom"
+          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$url" || echo curl-failed)"
+          case "$code" in
+            200) echo "::error::$url 已经存在 (404 才说明这个版本没被占过). 抬版本号再发。"; exit 1 ;;
+            404|403|410) echo "OK: $code — $url 未被占用" ;;
+            *) echo "WARN: 预检没查到结论 (http=$code), 继续发布";;
+          esac
+        env:
+          REVISION: ${{ steps.rev.outputs.revision }}
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }} + Central credentials
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+          # 对应 pom 里 central-publishing-maven-plugin 的 <publishingServerId>central</publishingServerId>
+          server-id: central
+          server-username-env-var: CENTRAL_USERNAME
+          server-password-env-var: CENTRAL_TOKEN
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase-env-var: GPG_PASSPHRASE
         env:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
           CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
 
       - name: mvn deploy -Pcentral
-        run: |
-          mvn -B -ntp deploy -Pcentral -DskipTests \
-              -Dgpg.passphrase="${{ secrets.GPG_PASSPHRASE }}" \
-              -Drevision="${{ steps.rev.outputs.revision }}"
+        # revision 经 env 传进来再引用, 不让标签里的字符参与命令行拼接.
+        run: mvn -B -ntp deploy -Pcentral -DskipTests -Drevision="$REVISION"
+        env:
+          REVISION: ${{ steps.rev.outputs.revision }}
 
       - name: Verify deployment
         if: success()
         run: |
-          echo "✅ Published. Verify at: https://central.sonatype.com/artifact/io.github.yuku123/z-mcp-starter"
+          echo "Published ${REVISION}. Verify at: https://repo1.maven.org/maven2/${GROUP_PATH}/${ARTIFACT}/${REVISION}/"
+        env:
+          REVISION: ${{ steps.rev.outputs.revision }}

@@ -239,6 +239,8 @@ mvn -B -ntp verify      # JDK 8（基线）或 JDK 17（下游实际运行版本
 
 间歇缺陷不按"跑一次绿"结算。stdio 那一组先前在**同一份代码**上 8 次里挂 2 次（两个不同的竞态），修完按 `for i in 1..12` 复跑 ⇒ 12/12。单次绿只用来发现，不用来定罪也不用来赦免。
 
+发布走 `.github/workflows/publish-central.yml`，**只有推 `v<x.y.z>` 标签（或手动 dispatch 并显式给 version）才会触发**，push 到 main 不发任何东西。版本号先过形状校验再落 `GITHUB_OUTPUT`：通配式 `[0-9]*.[0-9]*.[0-9]*` 的 `*` 会吞掉分号，实测 `0.2.0;rm -rf /` 能蒙过去（而这个值后面要进 URL 和 maven 命令行），所以换成严格的 `x.y.z[-后缀]` 正则；随后拿它探一次 `repo1.maven.org/…/z-mcp-core/<ver>/z-mcp-core-<ver>.pom`，**200 就拒绝发布** —— 中央仓库的坐标是永久占位，抬号是唯一出路（本机实跑这段脚本：`0.1.2` 那支被拦、`0.2.0` 是 404 放行）。credentials 与 GPG 由 `actions/setup-java@v6` 写进 `settings.xml`，口令经 `gpg.passphraseEnvName`（本仓钉 `maven-gpg-plugin` 3.2.7，≥3.2.0 才支持）从环境里取，**不出现在 `mvn` 的 argv 上** —— 同一台 runner 上任何一步 `ps` 都读不到它。
+
 测试刻意不用 mock 打靶：
 
 * `StdioJsonRpcExchangeTest` 起**真实子进程**，验证响应乱序与夹带通知时仍按 id 配对、stderr 灌 350 KB 不死锁（管道缓冲 64 KB）、子进程退出能立刻让挂起的请求失败；且退出之后再发请求要马上以"传输已关闭"收口 —— 不能把裸的 `Broken pipe` 交给调用方，也不能把请求写进没人读的缓冲区白等一个读超时（这条是实测跑出来的竞态，不是设想出来的）；
