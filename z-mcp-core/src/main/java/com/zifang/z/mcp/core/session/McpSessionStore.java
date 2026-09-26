@@ -372,6 +372,8 @@ public class McpSessionStore {
                     // 原样抛回来, 异步请求仍挂在容器上直到 sse.timeout-ms 才走 onTimeout。
                     // 一次客户端跑掉的广播因此会留下一个"再没人写、但要几十秒才闭合"的异步上下文,
                     // 而容器是在它终于回收时才把这条请求的资源还给池子的。
+                    log.warn("session {} dropped an SSE stream after a send failure: {}", getId(),
+                            ex.toString());
                     try {
                         e.complete();
                     } catch (Exception ignore) {
@@ -460,6 +462,8 @@ public class McpSessionStore {
                 } catch (Exception ex) {
                     emitters.remove(e);
                     // 与 {@link #emit} 同一件事: 光把它从名单里摘掉, 那条异步请求要一直挂到容器超时.
+                    log.warn("session {} dropped an SSE stream during keep-alive: {}", getId(),
+                            ex.toString());
                     try {
                         e.complete();
                     } catch (Exception ignore) {

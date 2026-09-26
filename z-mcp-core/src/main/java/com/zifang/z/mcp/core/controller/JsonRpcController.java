@@ -301,6 +301,9 @@ public class JsonRpcController {
                     properties.getSse().getRetryMs());
         } catch (Exception e) {
             s.removeEmitter(emitter);
+            // 一个 500 不留一行字, 是这条路径上最难查的部分: 客户端只看到流被结束, 而服务端
+            // 从没说过为什么。attach 里的写出与补发判定都可能抛, 所以这一行是唯一的归因点。
+            log.warn("session {} failed to open an SSE stream: {}", sessionId, e.toString());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
         if (replayed < 0) {
