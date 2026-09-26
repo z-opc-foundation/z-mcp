@@ -82,6 +82,30 @@ final class ServerSideLogCapture {
         return out.append(']').toString();
     }
 
+    /**
+     * 服务端有没有同时说到过这几样(任意一行正文同时含全部 needle 即命中), 命中就返回那一行原文.
+     *
+     * <p>为什么按"同一行里同时出现"判, 而不是"消息里含会话 id": 实测只判 id 会假绿 ——
+     * 同一会话的 "stream opened" 那行里本来就带着 id, 于是把真正的收流日志整行删掉,
+     * 断言照样通过, 守卫看着有牙实际咬的是别处.
+     *
+     * <p>返回原文而不是 boolean, 是因为调用方还要拿这一行去核对判红消息有没有把它带出来;
+     * 那样核对必须在**同一次读取**上做, 隔一句再读"最后一行"会随别的线程又写了一行而漂.
+     */
+    static String lineContaining(String... needles) {
+        for (String m : messages()) {
+            boolean all = true;
+            for (String needle : needles) {
+                if (!m.contains(needle)) {
+                    all = false;
+                    break;
+                }
+            }
+            if (all) return m;
+        }
+        return null;
+    }
+
     private static Logger store() {
         LoggerContext ctx = (LoggerContext) LoggerFactory.getILoggerFactory();
         return ctx.getLogger(McpSessionStore.class.getName());

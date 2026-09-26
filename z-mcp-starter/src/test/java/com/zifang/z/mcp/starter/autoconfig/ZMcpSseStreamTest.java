@@ -2,6 +2,8 @@ package com.zifang.z.mcp.starter.autoconfig;
 
 import com.zifang.z.mcp.api.dto.McpResourceDto;
 import com.zifang.z.mcp.core.registry.McpRegistry;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -28,6 +30,7 @@ import java.net.URL;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -72,6 +75,26 @@ public class ZMcpSseStreamTest {
 
     @Autowired
     private McpRegistry registry;
+
+    /**
+     * 服务端在这几条流上做过的决定.
+     *
+     * <p>CI 上的 {@code java.io.IOException: Premature EOF} 已经红在这条用例的 {@code frame()} 上
+     * 一次(jdk17 runner), 而红消息里只有客户端的症状: 读到的那一帧是空的, 流就断了. 服务端当时
+     * 是"把这条会话的流全收了"还是"这条会话压根没找到", 没有任何线索可循, 于是这条红既不能归因
+     * 也不能排除. 收上服务端的同期日志, 下一次它自己会把答案带出来.
+     */
+    @Before public void watchServerSideDecisions() {
+        ServerSideLogCapture.start();
+    }
+
+    @After public void stopWatchingServerSideDecisions() {
+        ServerSideLogCapture.stop();
+    }
+
+    private static String serverSide() {
+        return ServerSideLogCapture.rendered();
+    }
 
     @Test
     public void a_catalog_change_arrives_on_an_open_stream_as_a_real_frame() throws Exception {
@@ -510,9 +533,13 @@ public class ZMcpSseStreamTest {
                 frame.append(line);
             }
         } catch (SocketTimeoutException e) {
-            fail("15 秒内流上没有帧(已读到: " + frame + ")");
+            fail("15 秒内流上没有帧(已读到: " + frame + ")" + serverSide());
+        } catch (IOException e) {
+            // Premature EOF 走这一支: 它是 IOException 而不是"读到 null", 以前会直接逃出 frame(),
+            // 于是 CI 的红只剩一句症状。带着服务端同期的话判红, 才知道该往哪边查。
+            fail(e + "(已读到: " + frame + ")" + serverSide());
         }
-        fail("流在帧完整之前就结束了(已读到: " + frame + ")");
+        fail("流在帧完整之前就结束了(已读到: " + frame + ")" + serverSide());
         return frame.toString();
     }
 }

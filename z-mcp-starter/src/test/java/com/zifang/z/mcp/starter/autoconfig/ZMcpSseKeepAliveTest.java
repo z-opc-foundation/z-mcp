@@ -1,18 +1,10 @@
 package com.zifang.z.mcp.starter.autoconfig;
 
-import ch.qos.logback.classic.Level;
-import ch.qos.logback.classic.Logger;
-import ch.qos.logback.classic.LoggerContext;
-import ch.qos.logback.classic.spi.ILoggingEvent;
-import ch.qos.logback.core.read.ListAppender;
-import com.zifang.z.mcp.core.controller.JsonRpcController;
 import com.zifang.z.mcp.core.registry.McpRegistry;
-import com.zifang.z.mcp.core.session.McpSessionStore;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -77,54 +69,18 @@ public class ZMcpSseKeepAliveTest {
     /** 一条安静流上等到一帧心跳的上限: 周期 1 秒, 留出调度抖动和连接建立的余量. */
     private static final long HEARTBEAT_WAIT_MS = 12_000L;
 
-    /**
-     * 服务端在这几条流上做过的决定.
-     *
-     * <p>为什么要在判红时把它打出来: CI 上出现过一次 {@code java.io.IOException: Premature EOF}
-     * (jdk17 runner, 2.006 s, 红在续传那条流的第一次 readLine), 本机 8 遍 0 复现, 而那条红消息里
-     * 只有客户端的症状 —— 服务端是"摘掉了一条流"还是"这条会话压根没找到", 当时没有任何线索。
-     * 现在只要服务端说过话, 它就跟着红消息一起出来。
-     */
-    private static final ListAppender<ILoggingEvent> SERVER_SIDE = new ListAppender<ILoggingEvent>();
-
-    /** 装 appender 之前这两个 logger 各自的级别, {@code @After} 原样还回去. */
-    private static Level previousStoreLevel;
-    private static Level previousControllerLevel;
-
+    /** 服务端在这几条流上做过的决定, 收在同一处(收法与理由见 {@link ServerSideLogCapture}). */
     @Before public void watchServerSideDecisions() {
-        LoggerContext ctx = (LoggerContext) LoggerFactory.getILoggerFactory();
-        Logger store = ctx.getLogger(McpSessionStore.class.getName());
-        Logger controller = ctx.getLogger(JsonRpcController.class.getName());
-        // 级别也得在用法里钉死: 判据是"日志里要有这句话", 不能跟着环境的有效级别漂 ——
-        // 本项目已经有过两次"本机全绿而 CI 红"是量具随环境变的教训.
-        previousStoreLevel = store.getLevel();
-        previousControllerLevel = controller.getLevel();
-        store.setLevel(Level.DEBUG);
-        controller.setLevel(Level.DEBUG);
-        SERVER_SIDE.start();
-        store.addAppender(SERVER_SIDE);
-        controller.addAppender(SERVER_SIDE);
+        ServerSideLogCapture.start();
     }
 
-    /** 摘干净: 下一个用例若也挂一遍, 不该读到本用例留下的行; 别处的用例也不该被这个 appender 拖累. */
+    /** 摘干净: 下一个用例若也挂一遍, 不该读到本用例留下的行. */
     @After public void stopWatchingServerSideDecisions() {
-        LoggerContext ctx = (LoggerContext) LoggerFactory.getILoggerFactory();
-        Logger store = ctx.getLogger(McpSessionStore.class.getName());
-        Logger controller = ctx.getLogger(JsonRpcController.class.getName());
-        store.detachAppender(SERVER_SIDE);
-        controller.detachAppender(SERVER_SIDE);
-        store.setLevel(previousStoreLevel);
-        controller.setLevel(previousControllerLevel);
-        SERVER_SIDE.stop();
-        SERVER_SIDE.list.clear();
+        ServerSideLogCapture.stop();
     }
 
     private static String serverSide() {
-        StringBuilder out = new StringBuilder(" [服务端同期日志: ");
-        for (ILoggingEvent e : SERVER_SIDE.list) {
-            out.append(e.getLevel()).append(' ').append(e.getFormattedMessage()).append(" | ");
-        }
-        return out.append(']').toString();
+        return ServerSideLogCapture.rendered();
     }
 
     @LocalServerPort
@@ -193,17 +149,17 @@ public class ZMcpSseKeepAliveTest {
                     frame(in);
                 } catch (AssertionError red) {
                     String message = String.valueOf(red.getMessage());
-                    // 两半分开钉. 只判"消息里有没有会话 id"是不够的(实测这样会假绿): 这条会话在
-                    // "stream opened" 那行里就已经出现过, 于是把 closeEmitters 的日志整行删掉,
-                    // 断言照样通过 —— 守卫看着有牙, 实际咬的是别处.
-                    assertTrue("服务端要留下一行'是我把这条会话的流关掉了'(要同时说到会话、关闭、流): "
-                                    + serverSide(), containsCloseOf(id));
-                    String last = SERVER_SIDE.list.isEmpty() ? null
-                            : SERVER_SIDE.list.get(SERVER_SIDE.list.size() - 1).getFormattedMessage();
-                    assertNotNull("这条会话一路上服务端什么都没说过? 那下面那半句也没东西可带: "
-                            + serverSide(), last);
+                    // 两半分开钉, 且两半都落在同一次读取上. 只钉任何一半都会放过一类回归:
+                    // 少第一半, 服务端压根没说这句话时用例照样绿; 少第二半, 这句话说了但没进
+                    // 判红消息 —— 而那正是 CI 上那条红唯一还读得出来的地方.
+                    //
+                    // 也不判"消息里含会话 id"(实测那样会假绿): 这一路的 "stream opened" 行里本来
+                    // 就带 id, 把 closeEmitters 那行整行删掉断言照样通过.
+                    String close = ServerSideLogCapture.lineContaining(id, "clos", "stream");
+                    assertNotNull("服务端要留下一行'是我把这条会话的流关掉了'(要同时说到会话、关闭、流): "
+                            + serverSide(), close);
                     assertTrue("判红消息得把服务端同期的话带出来, 否则客户端症状仍归不到服务端: "
-                            + message, message.contains(last));
+                            + message, message.contains(close));
                     return;
                 }
             }
@@ -211,16 +167,6 @@ public class ZMcpSseKeepAliveTest {
         } finally {
             stream.disconnect();
         }
-    }
-
-    /** 服务端有没有说过"我把会话 {@code id} 的流关掉了". */
-    private static boolean containsCloseOf(String id) {
-        for (ILoggingEvent e : SERVER_SIDE.list) {
-            String m = e.getFormattedMessage();
-            // 不用 m.contains(id) 单独当判据: 同一会话的"stream opened"里也带这个 id.
-            if (m.contains(id) && m.contains("clos") && m.contains("stream")) return true;
-        }
-        return false;
     }
 
     /**
