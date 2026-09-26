@@ -8,13 +8,27 @@ import com.zifang.z.mcp.core.protocol.McpProtocolHandler;
 import com.zifang.z.mcp.core.registry.McpRegistry;
 import com.zifang.z.mcp.core.security.TransportSecurityGuard;
 import com.zifang.z.mcp.core.session.McpSessionStore;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
+import com.sun.net.httpserver.HttpServer;
 import org.junit.Test;
 import org.springframework.boot.autoconfigure.jackson.JacksonAutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.web.bind.annotation.RequestMapping;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.Charset;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -182,44 +196,183 @@ public class ZMcpAutoConfigurationTest {
         return health;
     }
 
+    /**
+     * 关掉上下文之后健康检查不再问任何东西 —— 判据是**上游收到几次请求**, 不是"有没有一条名字叫
+     * {@code z-mcp-server-health} 的线程".
+     *
+     * <p>原来这一条问的是后者, 而那个名字是全局固定的: 红只证明"那一刻确实有一条这个名字的线程活着",
+     * 说不清是本次那条 worker 没醒透（{@code shutdownNow()} 只发中断、不等终止）、还是同 JVM 里前一个
+     * context 留着的残留 —— CI 的 jdk17 格就是这么红过而同一趟的 jdk8 格全绿。现在两半各归一处:
+     * **数得出**的是"关闭以后上游还被问几次"(产品承诺), **按身份**等的是"我手里这几条线程得死"
+     * (资源收口)。迟到同步那一race 不在这里量 —— 它由 core 的
+     * {@code destroy_is_terminal_even_when_a_late_sync_arrives_afterwards} 按构造确定性地钉着。
+     */
     @Test
     public void closing_the_context_stops_the_health_check_thread() throws Exception {
-        runner.withPropertyValues("z.mcp.enabled=true",
-                "z.mcp.health-check-interval-seconds=1",
-                "z.mcp.servers[0].name=acme",
-                "z.mcp.servers[0].endpoint=http://127.0.0.1:1/mcp",
-                "z.mcp.servers[0].connect-timeout-millis=300",
-                "z.mcp.servers[0].read-timeout-millis=300").run(ctx -> {
-            ExternalServerManager manager = ctx.getBean(ExternalServerManager.class);
-            awaitHealth(manager, 5_000L);
-            assertTrue("首轮同步后应该已经有健康检查线程", awaitThread(HEALTH_THREAD, 3_000L));
+        final CountingUpstream upstream = new CountingUpstream();
+        upstream.start();
+        try {
+            // 同名线程在同一个 JVM 里可以有好几批(surefire 默认复用一个 fork, 别的类的 context
+            // 也可能留着一条): 开上下文**之前**先拍一张照, 只把我这一批新冒出来的算到自己头上 ——
+            // 数名字会把别人的残留判成"我没关掉线程", 那正是旧断言红过却说不清因的形状。
+            final Set<Thread> before = healthThreads();
+            runner.withPropertyValues("z.mcp.enabled=true",
+                    "z.mcp.health-check-interval-seconds=1",
+                    "z.mcp.servers[0].name=acme",
+                    "z.mcp.servers[0].endpoint=" + upstream.endpoint(),
+                    "z.mcp.servers[0].connect-timeout-millis=300",
+                    "z.mcp.servers[0].read-timeout-millis=300").run(ctx -> {
+                ExternalServerManager manager = ctx.getBean(ExternalServerManager.class);
+                awaitHealth(manager, 5_000L);
+                // 先证明这台尺数得到东西, 否则"关完之后计数没动"是一次空跑
+                int live = upstream.awaitPosts(2, 8_000L);
+                assertTrue("健康检查没在跑: 等满 8 秒上游只收到 " + live + " 次请求", live >= 2);
+                Set<Thread> ours = healthThreads();
+                ours.removeAll(before);
+                assertFalse("配了正间隔就该有一条属于本次上下文的健康检查线程", ours.isEmpty());
 
-            ctx.close();
-        });
-        assertFalse("context 已关, 健康检查线程还在跑 = destroyMethod 没生效",
-                awaitThread(HEALTH_THREAD, 1_500L));
+                ctx.close();
+
+                // 已在路上的那一次由 settle 吸收(读超时才 300 ms, 一个宽限期是它的四倍),
+                // 之后两个周期都不许再有新的一笔 —— 周期任务还活着就一定会漏出来。
+                int afterClose = upstream.settlePosts(1_200L);
+                Thread.sleep(2_500L);
+                assertEquals("context 已关, 上游却还在被周期性地问 = destroyMethod 没生效或 shutdown 没生效",
+                        Integer.valueOf(afterClose), Integer.valueOf(upstream.posts()));
+                for (Thread t : ours) {
+                    t.join(3_000L);
+                    assertFalse("destroy 之后这条健康检查线程还活着: "
+                            + t.getName() + "#" + System.identityHashCode(t), t.isAlive());
+                }
+            });
+        } finally {
+            upstream.stop();
+        }
     }
 
     private static final String HEALTH_THREAD = "z-mcp-server-health";
 
-    private static boolean awaitThread(String name, long maxWaitMillis) {
-        long deadline = System.currentTimeMillis() + maxWaitMillis;
-        while (System.currentTimeMillis() < deadline) {
-            if (hasThread(name)) return true;
-            try {
-                Thread.sleep(50L);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
+    /**
+     * 当下活着的健康检查线程, 按**对象身份**留档({@link Thread} 没覆写 equals/hashCode, 放进 Set
+     * 就是按身份比)。数名字会把同 JVM 里别的上下文的残留算到这台 manager 头上 —— 那正是旧断言红过
+     * 却说不清因的形状。
+     */
+    private static Set<Thread> healthThreads() {
+        Set<Thread> out = new HashSet<Thread>();
+        for (Thread t : Thread.getAllStackTraces().keySet()) {
+            if (HEALTH_THREAD.equals(t.getName()) && t.isAlive()) out.add(t);
         }
-        return hasThread(name);
+        return out;
     }
 
-    private static boolean hasThread(String name) {
-        for (Thread t : Thread.getAllStackTraces().keySet()) {
-            if (name.equals(t.getName()) && t.isAlive()) return true;
+    /**
+     * 一台只数 POST 的 JDK 真上游: 每一轮同步恰好落在一次 {@code initialize} 尝试上(永远答 500,
+     * 所以上游连不上、每轮重试一次握手, 但**轮与轮之间没有别的东西**在打它)。
+     *
+     * <p>用 {@code port 0} 让内核挑端口 —— 这条尺要的是"只有这一个进程能打到我", 写死端口做不到
+     * (本仓量过一次: 端口被人抢绑时流量会被别人的回环绑定影走)。收尾沿用 core 那侧学到的形状:
+     * JDK 8 的 {@code ServerImpl.stop(delay)} 有一处实测死锁, 所以 stop 跑在守护线程上、只等上限,
+     * 超时打一行可 grep 的 WARN 而不判红 —— 那是 JDK 与内核的毛病, 不该决定 CI 的寿命。
+     */
+    private static final class CountingUpstream {
+        private final AtomicInteger posts = new AtomicInteger();
+        private HttpServer server;
+        private ExecutorService executor;
+
+        void start() throws IOException {
+            server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            executor = Executors.newCachedThreadPool(new ThreadFactory() {
+                @Override public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, "z-mcp-starter-test-upstream");
+                    t.setDaemon(true);
+                    return t;
+                }
+            });
+            server.setExecutor(executor);
+            server.createContext("/mcp", new HttpHandler() {
+                @Override public void handle(HttpExchange ex) throws IOException {
+                    if ("POST".equals(ex.getRequestMethod())) posts.incrementAndGet();
+                    drain(ex.getRequestBody());
+                    byte[] payload = ("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,"
+                            + "\"message\":\"counting upstream\"}}")
+                            .getBytes(Charset.forName("UTF-8"));
+                    ex.getResponseHeaders().add("Content-Type", "application/json");
+                    ex.sendResponseHeaders(500, payload.length);
+                    OutputStream out = ex.getResponseBody();
+                    try {
+                        out.write(payload);
+                    } finally {
+                        out.close();
+                    }
+                    ex.close();
+                }
+            });
+            server.start();
         }
-        return false;
+
+        String endpoint() {
+            return "http://127.0.0.1:" + server.getAddress().getPort() + "/mcp";
+        }
+
+        int posts() {
+            return posts.get();
+        }
+
+        /** 等到至少 {@code want} 次, 或等满上限; 返回此刻的读数(调用方拿它判"是不是空跑"). */
+        int awaitPosts(int want, long maxWaitMillis) throws InterruptedException {
+            long deadline = System.currentTimeMillis() + maxWaitMillis;
+            while (System.currentTimeMillis() < deadline) {
+                int seen = posts.get();
+                if (seen >= want) return seen;
+                Thread.sleep(50L);
+            }
+            return posts.get();
+        }
+
+        /** 等到计数连续 {@code quietMillis} 不再变化为止, 返回那个稳定值. */
+        int settlePosts(long quietMillis) throws InterruptedException {
+            long quietSince = System.currentTimeMillis();
+            int last = posts.get();
+            while (System.currentTimeMillis() - quietSince < quietMillis) {
+                Thread.sleep(50L);
+                int now = posts.get();
+                if (now != last) {
+                    last = now;
+                    quietSince = System.currentTimeMillis();
+                }
+            }
+            return last;
+        }
+
+        void stop() {
+            final HttpServer toStop = server;
+            final ExecutorService pool = executor;
+            server = null;
+            executor = null;
+            if (toStop == null) return;
+            Thread stopper = new Thread("z-mcp-starter-test-upstream-stop") {
+                @Override public void run() {
+                    toStop.stop(0);
+                    pool.shutdownNow();
+                }
+            };
+            stopper.setDaemon(true);
+            stopper.start();
+            try {
+                stopper.join(10_000L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            if (stopper.isAlive()) {
+                System.err.println("WARN z-mcp-starter-test-httpserver-stop: stop(0) 未在 10000ms "
+                        + "内返回, 放弃等待 (JDK8 sun.net.httpserver 收尾死锁)");
+            }
+        }
+
+        private static void drain(InputStream in) throws IOException {
+            byte[] chunk = new byte[2048];
+            while (in.read(chunk) >= 0) { /* 只要体被读完, 内容对这条尺无意义 */ }
+            in.close();
+        }
     }
 }

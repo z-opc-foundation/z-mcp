@@ -316,6 +316,7 @@ public class ExternalServerManager {
     public synchronized void destroy() {
         destroyed = true;
         if (scheduler != null) {
+            scheduler.shutdownNow();
             scheduler = null;
         }
         for (Managed m : managed.values()) detach(m, "shutting down");
