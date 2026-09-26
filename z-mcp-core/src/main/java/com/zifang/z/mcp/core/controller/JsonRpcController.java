@@ -309,6 +309,14 @@ public class JsonRpcController {
                 emitter.complete();
             }
         });
+        // 这里刻意不注册 emitter.onError —— 不是漏了第五个出口, 是真 socket 上量过之后它没有独立的猎物:
+        // 客户端掐掉之后, 只要服务端还要写(广播或心跳), send() 就自己抛 ClientAbortException, 摘名单/
+        // complete()/留字三件事在同一个 catch 里已经做完了, 容器的 error 回调晚它一毫秒才落字(两个样本
+        // 都是如此)而且是另一条线程 —— 再注册一份只是把一句话说两遍(#42 刚为这个付过账); 而服务端不再
+        // 写的那些流, 容器根本不发 error 事件, 收流的仍是上面的 onTimeout。形状清单与逐条读数见 README
+        // #41/#43 那一段。另外那半句"出错结束的流"也轮不到它: initialize 抛出去之后没人再调
+        // completeWithError(全仓零调用点, 唯一提到它的两行都是注释), 而那个 catch 自己已经 log.error 过了。
+        // 没量到"只有 error 回调能救"的那条路; 哪天量到了, 请连带把那条路的名字一起写回这里。
         int replayed;
         try {
             replayed = s.attach(emitter, resumeFrom, McpSessionStore.STREAM_OPEN_COMMENT,
