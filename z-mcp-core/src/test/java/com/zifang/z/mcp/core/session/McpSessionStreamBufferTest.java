@@ -78,6 +78,48 @@ public class McpSessionStreamBufferTest {
         assertFalse("retry-ms=0 就不该下发: " + flat(frames.get(0)), frames.get(0).contains("retry:"));
     }
 
+    /**
+     * 空 data 的 priming 帧只发给读得动它的版本。2025-11-25 之前的客户端会把一条空 data 的事件
+     * 当成 JSON-RPC 消息去 parse —— 官方两份服务端实现(python / TS)因此都按版本设闸, 措辞逐字相同
+     * ("older clients cannot handle")。闸只管那一帧: 注释与 retry 是标准 SSE 字段, 老客户端
+     * 的解析器要么忽略注释、要么按 retry 改重连节奏, 都不碰 JSON, 所以照发。
+     */
+    @Test
+    public void a_stream_for_an_old_version_gets_no_empty_data_event() throws Exception {
+        properties.getSse().setBufferSize(64);
+        McpSessionStore.McpSession s = store.create("s-old-" + issued.incrementAndGet(), "2025-06-18");
+        assertTrue("会话没签发出来", s != null);
+        Recorder frames = new Recorder();
+
+        assertEquals(0, s.attach(frames, null, "open", 3000L));
+
+        assertEquals(1, frames.size());
+        String opened = frames.get(0);
+        assertTrue("开流帧照样带注释: " + flat(opened), opened.contains(":open"));
+        assertTrue("retry 与空 data 无关, 老版本的流也拿得到: " + flat(opened),
+                opened.contains("retry:3000"));
+        assertFalse("老版本的流不该收到一条空 data 的事件: " + flat(opened), opened.contains("data:"));
+        assertFalse("也不该拿到一个它用不上的 event id: " + flat(opened), opened.contains("id:"));
+    }
+
+    /**
+     * 没发出去的 id 不能占位。取号如果在闸外面, 老版本客户端看到的第一条真事件就是 2 号,
+     * 而序列里 1 号那个位置它永远读不到 —— "客户端读到过这个号"是流上 id 唯一的含义。
+     */
+    @Test
+    public void an_old_version_stream_does_not_burn_an_event_id() throws Exception {
+        properties.getSse().setBufferSize(64);
+        McpSessionStore.McpSession s = store.create("s-old-" + issued.incrementAndGet(), "2025-03-26");
+        Recorder frames = new Recorder();
+
+        s.attach(frames, null, "open", 1000L);
+        s.emit("{\"n\":1}");
+
+        assertEquals("开流帧 + 那条通知: " + show(frames), 2, frames.size());
+        assertEquals(1L, idOf(frames.get(1)));
+        assertEquals("{\"n\":1}", dataOf(frames.get(1)));
+    }
+
     // ------------------------------------------------------------------ 补发
 
     @Test

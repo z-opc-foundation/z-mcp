@@ -1,6 +1,7 @@
 package com.zifang.z.mcp.core.session;
 
 import com.zifang.z.mcp.core.properties.McpProperties;
+import com.zifang.z.mcp.core.protocol.McpSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -387,12 +388,16 @@ public class McpSessionStore {
         }
 
         /**
-         * 开一条服务端流: 原子地补发 {@code lastEventId} 之后仍留着的事件, 再发一条 priming 事件,
-         * 最后把 emitter 挂上.
+         * 开一条服务端流: 原子地补发 {@code lastEventId} 之后仍留着的事件, 再发一条开流帧
+         * (够格的版本还带上 priming), 最后把 emitter 挂上.
          *
          * <p>priming 是协议(2025-11-25)点名的 SHOULD: 一条只有 event id、data 为空的事件,
          * 让还没收到任何通知的客户端立刻拿到一个可续传的坐标; 顺带把 {@code retry} 字段带下去
          * (客户端对它是 MUST)。它的 id 在补发之后才取, 所以流上的 id 严格递增。
+         *
+         * <p>空 data 只发给 {@link McpSchema#SSE_PRIMING_SINCE} 及之后的版本 —— 更早的客户端
+         * 会把它当成一条 JSON-RPC 消息去 parse。开流注释帧与 {@code retry} 不受闸约束, 一条老版本
+         * 的流照样拿得到, 只是没有那个可续传的坐标(它本来也就续不了)。
          *
          * <p>补发与挂载同锁: 期间新推的事件要么已进缓冲(于是这条流补得到)、要么在挂载之后才发
          * (于是走实发), 不存在两边都不沾的窗口。写出走的是 SseEmitter 尚未初始化时的内存早发队列
@@ -425,8 +430,15 @@ public class McpSessionStore {
                 }
                 SseEmitter.SseEventBuilder prime = SseEmitter.event().comment(comment);
                 if (retryMs > 0) prime.reconnectTime(retryMs);
-                // 空 data 是协议点名的 priming 形状: 只给一个可续传的坐标, 不是一条消息
-                prime.id(String.valueOf(nextSeq())).data("");
+                // 空 data 是协议点名的 priming 形状: 只给一个可续传的坐标, 不是一条消息。
+                // 但只有 >= 2025-11-25 的客户端读得动它 —— 更早的实现会把空 data 当成一条
+                // JSON-RPC 消息去 parse。注释帧与 retry 照发: 它们是标准 SSE 字段, 老客户端
+                // 最多忽略注释, 不会碰 JSON。
+                if (McpSchema.supportsEmptySseData(protocolVersion)) {
+                    // 取号在闸**里面**: 一个从不发出去的 id 会在序列上留个洞, 而流上的 id
+                    // 唯一的含义就是"客户端读到过它"
+                    prime.id(String.valueOf(nextSeq())).data("");
+                }
                 emitter.send(prime);
                 emitters.add(emitter);
                 return replay.size();

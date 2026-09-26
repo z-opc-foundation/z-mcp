@@ -62,7 +62,11 @@ public class ZMcpSseKeepAliveTest {
 
     private static final String SESSION = "Mcp-Session-Id";
     private static final String PROTOCOL = "MCP-Protocol-Version";
-    private static final String VERSION = "2025-06-18";
+    // 这一类的三条判据都是"心跳与续传的相互影响": 心跳不占号、心跳之后第一条通知的 id 紧接
+    // priming、等两拍心跳再用旧位置回来仍补得到 —— 而"旧位置"这个前提只在拿得到 priming 坐标的
+    // 会话上成立(空 data 那一帧按版本设闸, 见 McpSchema.SSE_PRIMING_SINCE)。停在 2025-06-18
+    // 的话, 客户端手里从来就没有过坐标, 这三条会从"量到了性质"变成"量到了形状巧合"。
+    private static final String VERSION = "2025-11-25";
     private static final String EVENT_STREAM = "text/event-stream";
     private static final String BOTH = "application/json, text/event-stream";
 

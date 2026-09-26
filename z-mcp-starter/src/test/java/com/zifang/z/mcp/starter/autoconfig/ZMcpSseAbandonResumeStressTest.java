@@ -143,7 +143,7 @@ public class ZMcpSseAbandonResumeStressTest {
         HttpURLConnection first = open(id, null);
         try {
             BufferedReader in = reader(first);
-            frame(in);                                                        // priming
+            frame(in);             // 开流帧: 这一版(2025-06-18)只有注释 + retry, 没有空 data 的 priming
             registry.registerBuiltin("cut_probe", "probe", "{}", args -> "x");
             lastComplete = eventId(frame(in));                                // 最后一条完整的帧
             // 下一条: 只让它露出半截就撒手
@@ -184,7 +184,7 @@ public class ZMcpSseAbandonResumeStressTest {
         HttpURLConnection first = open(id, null);
         try {
             BufferedReader in = reader(first);
-            frame(in);                                        // priming
+            frame(in);                          // 开流帧(同上, 不带坐标)
             registry.registerBuiltin("stress_probe_" + i, "probe", "{}", args -> "x");
             String live = frame(in);                          // 断流之前看得见的这一条
             seen = eventId(live);
@@ -251,7 +251,7 @@ public class ZMcpSseAbandonResumeStressTest {
             }
             String prime = frame(in);
             if (!prime.contains("z-mcp stream open")) {
-                return Attempt.wrong("补完之后没有本条流自己的 priming 帧: " + show(prime));
+                return Attempt.wrong("补完之后没有本条流自己的开流帧: " + show(prime));
             }
             return Attempt.done();
         } catch (IOException e) {

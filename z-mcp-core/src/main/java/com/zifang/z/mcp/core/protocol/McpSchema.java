@@ -86,6 +86,27 @@ public final class McpSchema {
         return version != null && SUPPORTED_VERSIONS.contains(version);
     }
 
+    /**
+     * 从哪一版起, 一条只有 event id、{@code data} 为空的 SSE 事件才是客户端读得动的.
+     *
+     * <p>这一版之前空 data 会被当成一条 JSON-RPC 消息送去 parse。官方两份服务端实现
+     * (python {@code streamable_http._maybe_send_priming_event} 与 TS
+     * {@code webStandardStreamableHttp.writePrimingEvent}) 都按同一版本设闸, 措辞逐字相同
+     * ("older clients cannot handle")。
+     */
+    public static final String SSE_PRIMING_SINCE = "2025-11-25";
+
+    /**
+     * 协商出的版本读得动空 data 吗.
+     *
+     * <p>版本串是零填充的日期式({@link #SUPPORTED_VERSIONS} 里每一枚都是), 所以字典序就是时间序,
+     * 与两份参照实现一样直接比字符串。null / 未知一律按"读不动"处理: 少发一帧只是少一个续传坐标,
+     * 多发一帧可能让老客户端把整条流判坏。
+     */
+    public static boolean supportsEmptySseData(String version) {
+        return version != null && version.compareTo(SSE_PRIMING_SINCE) >= 0;
+    }
+
     /** tools 能力; listChanged=true 表示服务端会推 notifications/tools/list_changed. */
     public static Map<String, Object> toolsCapability(boolean listChanged) {
         Map<String, Object> m = new LinkedHashMap<String, Object>();

@@ -63,7 +63,12 @@ public class ZMcpSseStreamTest {
 
     private static final String SESSION = "Mcp-Session-Id";
     private static final String PROTOCOL = "MCP-Protocol-Version";
-    private static final String VERSION = "2025-06-18";
+    // 这一类的用例量的是"开流 + 可续传", 而那两件事是 2025-11-25 才写进协议的
+    // (priming 事件、只有 id 没有 data 的那种帧)。老版本那一侧另有用例守着, 见
+    // #a_stream_of_an_old_version_gets_no_empty_data_event。
+    private static final String VERSION = "2025-11-25";
+    /** 空 data 的 priming 帧从 {@link #VERSION} 起才有; 这一版之前的客户端会把它当 JSON 去 parse. */
+    private static final String BEFORE_PRIMING = "2025-06-18";
     private static final String EVENT_STREAM = "text/event-stream";
     private static final String BOTH = "application/json, text/event-stream";
 
@@ -187,6 +192,44 @@ public class ZMcpSseStreamTest {
         } finally {
             again.disconnect();
             terminate(id);
+        }
+    }
+
+    /**
+     * 空 data 那一帧只发给读得动它的版本: 2025-11-25 之前的客户端会拿空串去 parse 一条 JSON-RPC
+     * 消息(官方两份服务端实现因此都按版本设闸)。这条走的是真 HTTP, 为的不是再量一遍帧的形状
+     * —— 那是 core 那两条用例的活 —— 而是证"闸读的那一枚版本真的从 initialize 走到了开流":
+     * 会话上的版本由握手写入, 中间隔着一层控制器, 只在会话对象上设闸的话, 一条单测永远绿着而
+     * 线上照样给老客户端发空 data。注释帧与 retry 照旧下发, 它们不碰 JSON。
+     */
+    @Test
+    public void a_stream_of_an_old_version_gets_no_empty_data_event() throws Exception {
+        String id = handshake(BEFORE_PRIMING);
+        HttpURLConnection stream = open(EVENT_STREAM, id, null);
+        try {
+            BufferedReader in = reader(stream);
+            String greeting = frame(in);
+            assertTrue("开流帧要带注释: " + show(greeting), greeting.contains("z-mcp stream open"));
+            assertTrue("retry 是标准 SSE 字段, 与空 data 无关, 老版本的流也拿得到: " + show(greeting),
+                    greeting.contains("retry:"));
+            assertFalse("老版本的流不该收到一条空 data 的事件: " + show(greeting),
+                    greeting.contains("data:"));
+            assertFalse("更不该收到一个它读不动的 event id: " + show(greeting),
+                    greeting.contains("id:"));
+
+            registry.registerBuiltin("sse_probe_old_version", "probe", "{}", args -> "x");
+            try {
+                String pushed = frame(in);
+                assertTrue("通知照发, 闸只管 priming: " + show(pushed),
+                        pushed.contains("notifications/tools/list_changed"));
+                assertEquals("没发出去的那个号不该占位, 第一条真事件就是 1 号: " + show(pushed),
+                        1L, eventId(pushed));
+            } finally {
+                registry.unregister("sse_probe_old_version");
+            }
+        } finally {
+            stream.disconnect();
+            terminate(id, BEFORE_PRIMING);
         }
     }
 
@@ -457,16 +500,25 @@ public class ZMcpSseStreamTest {
 
     /** initialize + notifications/initialized; 协议要求这一步之后才允许用这条会话. */
     private String handshake() {
+        return handshake(VERSION);
+    }
+
+    /** 同上, 但由调用方点名协商哪个版本 —— 会话存下来的那一枚就是开流时要读的闸. */
+    private String handshake(String protocol) {
         HttpHeaders headers = new HttpHeaders();
         headers.set("Accept", BOTH);
         // 不写这行的话 RestTemplate 会给 String 体补一个 text/plain;charset=UTF-8 ⇒ 415
         headers.setContentType(MediaType.APPLICATION_JSON);
         ResponseEntity<String> res = rest.exchange("http://127.0.0.1:" + port + "/mcp", HttpMethod.POST,
                 new HttpEntity<>("{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":"
-                        + "{\"protocolVersion\":\"" + VERSION + "\",\"capabilities\":{},"
+                        + "{\"protocolVersion\":\"" + protocol + "\",\"capabilities\":{},"
                         + "\"clientInfo\":{\"name\":\"sse-e2e\",\"version\":\"1\"}}}", headers),
                 String.class);
         assertEquals(res.getBody(), HttpStatus.OK, res.getStatusCode());
+        // 协商是"原样回显被支持的版本": 这一句守着下面那条用例的前提 —— 它要量的是老版本那条流,
+        // 服务端要是把版本抬了, 那个前提就没了而用例照样全绿
+        assertTrue("服务端没答应这个版本: " + res.getBody(),
+                res.getBody().contains("\"protocolVersion\":\"" + protocol + "\""));
         String id = res.getHeaders().getFirst(SESSION);
         assertTrue("initialize 必须签发会话 id, 否则没有流可开", id != null && !id.isEmpty());
 
@@ -474,7 +526,7 @@ public class ZMcpSseStreamTest {
         ack.set("Accept", BOTH);
         ack.setContentType(MediaType.APPLICATION_JSON);
         ack.set(SESSION, id);
-        ack.set(PROTOCOL, VERSION);
+        ack.set(PROTOCOL, protocol);
         ResponseEntity<String> notified = rest.exchange("http://127.0.0.1:" + port + "/mcp", HttpMethod.POST,
                 new HttpEntity<>("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}", ack),
                 String.class);
@@ -533,9 +585,14 @@ public class ZMcpSseStreamTest {
      * "Unexpected end of file"(实测撞上过一次, 那一轮整类耗时从 4 秒涨到 25 秒)。
      */
     private void terminate(String sessionId) {
+        terminate(sessionId, VERSION);
+    }
+
+    /** DELETE 也要报版本: 与会话协商的那一枚不符, 服务端按协议直接 400. */
+    private void terminate(String sessionId, String protocol) {
         HttpHeaders headers = new HttpHeaders();
         headers.set(SESSION, sessionId);
-        headers.set(PROTOCOL, VERSION);
+        headers.set(PROTOCOL, protocol);
         ResponseEntity<String> res = rest.exchange("http://127.0.0.1:" + port + "/mcp",
                 HttpMethod.DELETE, new HttpEntity<String>(headers), String.class);
         assertEquals(res.getBody(), HttpStatus.OK, res.getStatusCode());
