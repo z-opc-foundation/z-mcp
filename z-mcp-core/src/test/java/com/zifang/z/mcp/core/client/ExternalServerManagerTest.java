@@ -610,6 +610,71 @@ public class ExternalServerManagerTest {
         assertEquals(1, f.registry.toolCount());
     }
 
+    /**
+     * 上游目录里**只有被环检测拒收的那部分**变了, 收进来的那部分不许被重发布.
+     *
+     * <p>签名如果取在过滤**之前**, hub↔hub 环上对岸每聚合一轮都会把"抄回来的复制品"换一批代际,
+     * 于是这一轮被当成"目录变了" —— 而"变了"的代价是先把收进来的那几条 {@code unregister} 再重新
+     * {@code register}。中间那一下, 正在读 {@code tools/list} 的人看见自己这边的目录凭空少几条
+     * (真进程尺 {@code HubAggregationTest.two_hubs_that_aggregate_each_other_reach_a_fixed_point}
+     * 在本机 jdk17 全量跑到过这个形状: 12 条里只剩 10 条, 缺的正是 {@code origin__registry_state}
+     * 与 {@code origin__system_info}), 每条会话还白收一对 {@code list_changed}。
+     *
+     * <p>"任何一次 fire 里都读不到空洞"这条守卫, 只对**被拒部分的抖动**成立(那本来就不该动目录);
+     * 收进来的部分真变了要不要也做成无洞的原子替换, 是另一件事(见下面那条阳性对照里刻意没断言它)。
+     */
+    @Test
+    public void churn_only_in_the_rejected_part_does_not_re_publish_the_accepted_part() throws Exception {
+        final Fixture f = new Fixture();
+        f.properties.setServerName("hub-a");
+        final int[] fires = new int[1];
+        final List<String> blind = new ArrayList<String>();
+        f.registry.addChangeListener(McpRegistry.Change.TOOLS, new Runnable() {
+            @Override public void run() {
+                fires[0]++;
+                if (!f.registry.hasTool("b_own")) blind.add(f.registry.toolNames().toString());
+            }
+        });
+        f.server("mirror");
+        FakeExchange mirror = f.upstream("mirror");
+        handshakeAs(mirror, "s1", "hub-b");
+        String keep = "{\"name\":\"b_own\",\"description\":\"对岸自己的工具\","
+                + "\"inputSchema\":{\"type\":\"object\"},"
+                + "\"_meta\":{\"z-mcp/server\":\"a\",\"z-mcp/origins\":\"hub-b\"}}";
+        String echoed = "{\"name\":\"hub-a__echo\",\"description\":\"抄回来的一条\","
+                + "\"inputSchema\":{\"type\":\"object\"},"
+                + "\"_meta\":{\"z-mcp/server\":\"a\",\"z-mcp/origins\":\"hub-a,hub-b\"}}";
+        toolsPage(mirror, "[" + keep + "," + echoed + "]");
+
+        f.manager.syncAll();
+        int afterFirst = fires[0];
+        assertTrue("第一轮必须有东西可播, 否则下面的负向断言是空跑: fires=" + afterFirst, afterFirst > 0);
+        assertTrue(f.registry.hasTool("b_own"));
+        assertEquals(1, f.registry.toolCount());
+        blind.clear();
+
+        // 只有被拒的那部分变了(对岸又聚合一轮 ⇒ 复制品多了一代描述), 收进来的那条逐字未变
+        toolsPage(mirror, "[" + keep + ","
+                + "{\"name\":\"hub-a__echo\",\"description\":\"抄回来的第二条(换了措辞)\","
+                + "\"inputSchema\":{\"type\":\"object\"},"
+                + "\"_meta\":{\"z-mcp/server\":\"a\",\"z-mcp/origins\":\"hub-a,hub-b\"}}" + "]");
+        f.manager.syncAll();
+
+        assertEquals("被拒的条目抖动不该惊动任何会话", afterFirst, fires[0]);
+        assertEquals("也不该让目录出现哪怕一次空洞: " + blind, 0, blind.size());
+        assertEquals(1, f.registry.toolCount());
+        assertTrue(f.registry.hasTool("b_own"));
+
+        // 阳性对照(反向不许过头): 收进来的那条真变了就要落地 —— 否则这条尺等于"永远不重发布"
+        toolsPage(mirror, "["
+                + "{\"name\":\"b_own\",\"description\":\"对岸改了描述\","
+                + "\"inputSchema\":{\"type\":\"object\"},"
+                + "\"_meta\":{\"z-mcp/server\":\"a\",\"z-mcp/origins\":\"hub-b\"}}" + "]");
+        f.manager.syncAll();
+        assertTrue("收进来的部分变了必须播", fires[0] > afterFirst);
+        assertEquals("对岸改了描述", "对岸改了描述", f.registry.lookup("b_own").description);
+    }
+
     /** {@link ExternalServerManager} 起的那条周期线程叫这个. */
     private static final String HEALTH_THREAD = "z-mcp-server-health";
 

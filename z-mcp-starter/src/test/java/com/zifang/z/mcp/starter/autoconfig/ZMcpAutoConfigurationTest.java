@@ -204,7 +204,7 @@ public class ZMcpAutoConfigurationTest {
      * 说不清是本次那条 worker 没醒透（{@code shutdownNow()} 只发中断、不等终止）、还是同 JVM 里前一个
      * context 留着的残留 —— CI 的 jdk17 格就是这么红过而同一趟的 jdk8 格全绿。现在两半各归一处:
      * **数得出**的是"关闭以后上游还被问几次"(产品承诺), **按身份**等的是"我手里这几条线程得死"
-     * (资源收口)。迟到同步那一race 不在这里量 —— 它由 core 的
+     * (资源收口)。迟到同步那一族竞态不在这里量 —— 它由 core 的
      * {@code destroy_is_terminal_even_when_a_late_sync_arrives_afterwards} 按构造确定性地钉着。
      */
     @Test
@@ -233,9 +233,13 @@ public class ZMcpAutoConfigurationTest {
 
                 ctx.close();
 
-                // 已在路上的那一次由 settle 吸收(读超时才 300 ms, 一个宽限期是它的四倍),
-                // 之后两个周期都不许再有新的一笔 —— 周期任务还活着就一定会漏出来。
-                int afterClose = upstream.settlePosts(1_200L);
+                // 宽限期是**定长**的, 不是"等计数自己稳定下来": 无界的等待会把"摘掉 shutdownNow"
+                // 那支变异从判红变成挂死 —— 第一版的 settle 循环就是这么绕了 466 秒(周期任务还在跑,
+                // quiet 窗口每拍都被复位, 主线程卡在 Thread.sleep 里)。2 秒是客户端总超时
+                // (300ms 连接 + 300ms 读)的三倍, 足够吸收关闭前最后一拍还在路上的那一次;
+                // 之后再等 2.5 秒 = 两个多周期, 周期任务只要还活着就一定会漏出来。
+                Thread.sleep(2_000L);
+                int afterClose = upstream.posts();
                 Thread.sleep(2_500L);
                 assertEquals("context 已关, 上游却还在被周期性地问 = destroyMethod 没生效或 shutdown 没生效",
                         Integer.valueOf(afterClose), Integer.valueOf(upstream.posts()));
@@ -327,21 +331,6 @@ public class ZMcpAutoConfigurationTest {
                 Thread.sleep(50L);
             }
             return posts.get();
-        }
-
-        /** 等到计数连续 {@code quietMillis} 不再变化为止, 返回那个稳定值. */
-        int settlePosts(long quietMillis) throws InterruptedException {
-            long quietSince = System.currentTimeMillis();
-            int last = posts.get();
-            while (System.currentTimeMillis() - quietSince < quietMillis) {
-                Thread.sleep(50L);
-                int now = posts.get();
-                if (now != last) {
-                    last = now;
-                    quietSince = System.currentTimeMillis();
-                }
-            }
-            return last;
         }
 
         void stop() {

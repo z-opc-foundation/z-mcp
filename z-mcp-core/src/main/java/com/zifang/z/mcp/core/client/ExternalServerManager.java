@@ -180,7 +180,24 @@ public class ExternalServerManager {
      * @return 这一次是否真的动了目录(逐字未变时返回 false, 于是也不惊动任何会话)
      */
     private boolean publish(Managed m, McpProperties.ServerConfig config, List<McpToolDto> tools) {
-        String signature = signatureOf(tools);
+        // 先过滤、再取签名 —— 顺序本身就是这条判据的全部内容.
+        //
+        // 签名若含"被环检测拒收的那些复制品", hub↔hub 环上对岸每聚合一轮都会让它们换个措辞,
+        // 于是这一轮被判成"目录变了"; 而"变了"的动作是 dropTools() 再逐条重登**同一批**收进来的
+        // 工具 —— 中间那一下, 一次 Change.TOOLS 里读 tools/list 会看见整批条目不见了
+        // (单元层实测: 观察到的目录是 []; 真进程层实测: 12 条里只剩 10 条). 更糟的是这次 fire
+        // 恰好通知了所有会话"来重取目录", 而协议要求它们收到就重取 —— 我们主动把客户端领进空洞里.
+        final String self = properties.getServerName();
+        List<McpToolDto> accepted = new ArrayList<McpToolDto>();
+        int echoed = 0;
+        for (McpToolDto tool : tools) {
+            // 环检测: 上游把**我这台**广告出去的工具抄回来还给我了. 收下它不会报错, 只会每轮多一代
+            // 前缀名(撞名分支给它 invent 一个 server__x 的新名字), 于是目录无界增长.
+            // 判据是来源链而不是名字: 链由每一跳在广告时追加自己的 server-name, 所以环上一定有自己.
+            if (self != null && tool.getOrigins() != null && tool.getOrigins().contains(self)) echoed++;
+            else accepted.add(tool);
+        }
+        String signature = signatureOf(accepted);
         if (signature.equals(m.publishedSignature) && stillRegistered(m)) {
             //  重抄一遍同样的目录会 fire 两次变更(摘一次、登一次), 而每条会话都会因此收到
             //  notifications/tools/list_changed 并去重取 tools/list —— 250 上实测每轮 8 帧.
@@ -189,17 +206,7 @@ public class ExternalServerManager {
         m.publishedSignature = signature;
         dropTools(m);
         final McpRemoteClient client = m.client;
-        final String self = properties.getServerName();
-        List<McpToolDto> accepted = new ArrayList<McpToolDto>();
-        int echoed = 0;
-        for (final McpToolDto tool : tools) {
-            // 环检测: 上游把**我这台**广告出去的工具抄回来还给我了. 收下它不会报错, 只会每轮多一代
-            // 前缀名(撞名分支给它 invent 一个 server__x 的新名字), 于是目录无界增长.
-            // 判据是来源链而不是名字: 链由每一跳在广告时追加自己的 server-name, 所以环上一定有自己.
-            if (self != null && tool.getOrigins() != null && tool.getOrigins().contains(self)) {
-                echoed++;
-                continue;
-            }
+        for (final McpToolDto tool : accepted) {
             String remoteName = tool.getName();
             String effective = registry.tool(remoteName)
                     .title(tool.getTitle())
@@ -216,7 +223,6 @@ public class ExternalServerManager {
                         }
                     });
             m.toolNames.add(effective);
-            accepted.add(tool);
         }
         if (echoed > 0) {
             log.warn("mcp server {} returned {} tool(s) that this server ({}) itself advertised;"
@@ -229,8 +235,8 @@ public class ExternalServerManager {
     }
 
     /**
-     * 上游目录的内容签名: 只取会进目录、会被人看见的字段, 并按名字排序 ——
-     * 上游把同一批工具换个顺序回来, 不该被当成变更.
+     * 上游目录的内容签名: 只取**收进来的**、会进目录、会被人看见的字段, 并按名字排序 ——
+     * 上游把同一批工具换个顺序回来, 不该被当成变更; 被环检测拒收的那部分怎么抖, 也不该.
      */
     private static String signatureOf(List<McpToolDto> tools) {
         Set<String> lines = new TreeSet<String>();
