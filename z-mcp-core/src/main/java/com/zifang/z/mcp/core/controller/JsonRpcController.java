@@ -293,7 +293,21 @@ public class JsonRpcController {
             @Override public void run() { s.removeEmitter(emitter); }
         });
         emitter.onTimeout(new Runnable() {
-            @Override public void run() { s.removeEmitter(emitter); emitter.complete(); }
+            @Override public void run() {
+                // 这是五个会结束流的出口里最后一个不留字的: 写出失败/心跳写失败/会话收流/开流 500
+                // 四处都已经各有一行, 而这一处是生产上最常见的一种 —— 客户端挂着一条流不动,
+                // 过了 sse.timeout-ms 被容器收走。日志里若没有会话 id 与时长, 服务端就永远说不出
+                // "是我把这条会话的流关了, 因为它空闲超时", 排障时它和"反代掐了"是同一种症状。
+                //
+                // 下面那两行与 onCompletion 里的第三次摘除互为冗余(实测: 只摘任一处都归不了红,
+                // 两处一起摘才红)。留着不是因为 Spring 不会自己收流, 而是因为"客户端读到 EOF"
+                // 与"onCompletion 落地"谁先谁后没有保证 —— 会话的流计数要在自己这条路上说了算,
+                // 不能等另一条线程。改这段之前先读 ZMcpSseIdleStreamTimeoutTest 的那三支变异。
+                log.warn("session {} closed an idle SSE stream after {} ms without data",
+                        sessionId, Long.valueOf(properties.getSse().getTimeoutMs()));
+                s.removeEmitter(emitter);
+                emitter.complete();
+            }
         });
         int replayed;
         try {
