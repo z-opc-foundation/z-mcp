@@ -36,6 +36,7 @@ import java.net.URL;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -192,8 +193,17 @@ public class ZMcpSseKeepAliveTest {
                     frame(in);
                 } catch (AssertionError red) {
                     String message = String.valueOf(red.getMessage());
-                    assertTrue("判红消息里要带服务端同期说的话(含会话 id), 否则客户端的症状归不到服务端: "
-                                    + message, message.contains(id));
+                    // 两半分开钉. 只判"消息里有没有会话 id"是不够的(实测这样会假绿): 这条会话在
+                    // "stream opened" 那行里就已经出现过, 于是把 closeEmitters 的日志整行删掉,
+                    // 断言照样通过 —— 守卫看着有牙, 实际咬的是别处.
+                    assertTrue("服务端要留下一行'是我把这条会话的流关掉了'(要同时说到会话、关闭、流): "
+                                    + serverSide(), containsCloseOf(id));
+                    String last = SERVER_SIDE.list.isEmpty() ? null
+                            : SERVER_SIDE.list.get(SERVER_SIDE.list.size() - 1).getFormattedMessage();
+                    assertNotNull("这条会话一路上服务端什么都没说过? 那下面那半句也没东西可带: "
+                            + serverSide(), last);
+                    assertTrue("判红消息得把服务端同期的话带出来, 否则客户端症状仍归不到服务端: "
+                            + message, message.contains(last));
                     return;
                 }
             }
@@ -201,6 +211,16 @@ public class ZMcpSseKeepAliveTest {
         } finally {
             stream.disconnect();
         }
+    }
+
+    /** 服务端有没有说过"我把会话 {@code id} 的流关掉了". */
+    private static boolean containsCloseOf(String id) {
+        for (ILoggingEvent e : SERVER_SIDE.list) {
+            String m = e.getFormattedMessage();
+            // 不用 m.contains(id) 单独当判据: 同一会话的"stream opened"里也带这个 id.
+            if (m.contains(id) && m.contains("clos") && m.contains("stream")) return true;
+        }
+        return false;
     }
 
     /**
