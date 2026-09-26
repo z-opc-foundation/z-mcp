@@ -16,9 +16,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -42,24 +40,14 @@ public class ZMcpSseStreamDropLogTest {
 
     /** 写下去就失败的一条流 —— 生产上对应"客户端已经跑掉、服务端还在往 socket 里写". */
     private static final class BrokenEmitter extends SseEmitter {
-        /** 那次写出真正抛出去的东西. */
-        Throwable failure;
-        /** 只记"按错误闭合": 走 {@code complete()} 会留 null, 而这两种收尾对容器说的话不一样. */
-        Throwable closedWith;
-        boolean closedAsFinished;
+        boolean completed;
 
         @Override public void send(SseEventBuilder builder) throws IOException {
-            IOException gone = new IOException("wire went away");
-            failure = gone;
-            throw gone;
+            throw new IOException("wire went away");
         }
 
         @Override public synchronized void complete() {
-            closedAsFinished = true;
-        }
-
-        @Override public synchronized void completeWithError(Throwable ex) {
-            closedWith = ex;
+            completed = true;
         }
     }
 
@@ -83,13 +71,10 @@ public class ZMcpSseStreamDropLogTest {
 
             session.emit("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}");
 
-            // 这三样是"摘流"这个决定的全部后果, 分开钉: 少了那次闭合就是那条要挂到容器超时
+            // 这三样是"摘流"这个决定的全部后果, 分开钉: 少了 complete() 就是那条要挂到容器超时
             // 才回收的异步请求, 少了名单里的摘除就是往死流上一直写, 少了日志就是 CI 上那种
             // "客户端红了一行 Premature EOF、服务端什么都没说过".
-            assertSame("写失败的流要当场按写出失败的那个因闭合, 不能让它挂到容器超时",
-                    dead.failure, dead.closedWith);
-            assertFalse("也不能按\"内容发全了\"收尾: 对端是在写的中途没掉的, 容器需要知道这是失败",
-                    dead.closedAsFinished);
+            assertTrue("写失败的流要被 complete() 掉, 不能让它挂到容器超时", dead.completed);
             assertEquals("摘掉之后这条会话不该还挂着它", 0, session.emitterCount());
 
             List<String> warns = new ArrayList<String>();

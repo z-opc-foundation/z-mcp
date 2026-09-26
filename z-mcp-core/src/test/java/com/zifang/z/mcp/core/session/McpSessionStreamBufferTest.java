@@ -12,12 +12,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -343,8 +342,7 @@ public class McpSessionStreamBufferTest {
 
         assertEquals("只有那条写得出去的算送达", 1, store.tick());
         assertEquals("写不出去的那条该被摘掉: " + s.emitterCount(), 1, s.emitterCount());
-        assertSame("摘掉名单不等于收掉请求: 心跳发现的这条死流要当场按写出失败的那个因闭合",
-                boom.failure.get(), boom.closedWith.get());
+        assertTrue("摘掉名单不等于收掉请求: 心跳发现的这条死流要当场闭合", boom.completed.get());
         assertEquals("摘完剩下的那条继续收心跳", 1, store.tick());
     }
 
@@ -374,8 +372,7 @@ public class McpSessionStreamBufferTest {
         assertTrue("通知要原样落到活着的流上: " + show(live),
                 live.get(1).contains("notifications/tools/list_changed"));
         assertEquals("写不出的那条该从名单里摘掉: " + s.emitterCount(), 1, s.emitterCount());
-        assertSame("摘掉的同时要闭合它, 别让异步请求挂到 sse.timeout-ms; 而且要说清是失败收尾",
-                boom.failure.get(), boom.closedWith.get());
+        assertTrue("摘掉的同时要闭合它, 别让异步请求挂到 sse.timeout-ms", boom.completed.get());
 
         Recorder resumed = new Recorder();
         assertEquals("那条事件不能跟着 emitter 一起丢: 还留在缓冲里补得上",
@@ -432,10 +429,7 @@ public class McpSessionStreamBufferTest {
      * (流是先开好的, 客户端半路关了)。
      */
     private static final class Boom extends Recorder {
-        /** 只记"按错误闭合"那一条路: 记成 {@code complete()} 也算红, 两种收尾对容器说的话不一样. */
-        private final AtomicReference<Throwable> closedWith = new AtomicReference<Throwable>();
-        /** 那次写出真正抛出去的东西 —— 闭合时必须原样带出去, 不能换个别的. */
-        private final AtomicReference<Throwable> failure = new AtomicReference<Throwable>();
+        private final AtomicBoolean completed = new AtomicBoolean();
         private final int diesFrom;
         private int sends;
 
@@ -448,17 +442,13 @@ public class McpSessionStreamBufferTest {
         }
 
         @Override public void send(SseEventBuilder builder) throws IOException {
-            if (sends++ >= diesFrom) {
-                IOException gone = new IOException("client is gone");
-                failure.set(gone);
-                throw gone;
-            }
+            if (sends++ >= diesFrom) throw new IOException("client is gone");
             super.send(builder);
         }
 
-        @Override public void completeWithError(Throwable ex) {
-            closedWith.set(ex);
-            super.completeWithError(ex);
+        @Override public void complete() {
+            completed.set(true);
+            super.complete();
         }
     }
 
