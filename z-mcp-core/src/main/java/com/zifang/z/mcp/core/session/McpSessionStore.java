@@ -375,7 +375,11 @@ public class McpSessionStore {
                     log.warn("session {} dropped an SSE stream after a send failure: {}", getId(),
                             ex.toString());
                     try {
-                        e.complete();
+                        // 按"错误"收尾而不是按"正常完成"收尾: 这条请求的对端是在写的中途没掉的,
+                        // 容器需要知道这是一次失败(走 error 分支把连接收干净), 而不是一个内容已经
+                        // 发全的响应。已证实的是不闭合会更糟(挂到 sse.timeout-ms); 选 completeWithError
+                        // 的理由还没证实 —— 见 README「构建与测试」里那条 Premature EOF 台账。
+                        e.completeWithError(ex);
                     } catch (Exception ignore) {
                         // 对端已经不在了, 闭合本身不会再成功
                     }
@@ -465,7 +469,8 @@ public class McpSessionStore {
                     log.warn("session {} dropped an SSE stream during keep-alive: {}", getId(),
                             ex.toString());
                     try {
-                        e.complete();
+                        // 与 {@link #emit} 那处同一个收尾方式: 按错误闭合, 理由与未证实的部分都写在那里。
+                        e.completeWithError(ex);
                     } catch (Exception ignore) {
                         // 对端已经不在了
                     }
