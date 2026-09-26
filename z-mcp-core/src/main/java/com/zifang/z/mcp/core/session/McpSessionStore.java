@@ -368,6 +368,15 @@ public class McpSessionStore {
                     e.send(SseEmitter.event().id(id).data(json));
                 } catch (Exception ex) {
                     emitters.remove(e);
+                    // 摘掉名单不等于收掉那条请求: Spring 的 send() 在写失败时只置 sendFailed 并把异常
+                    // 原样抛回来, 异步请求仍挂在容器上直到 sse.timeout-ms 才走 onTimeout。
+                    // 一次客户端跑掉的广播因此会留下一个"再没人写、但要几十秒才闭合"的异步上下文,
+                    // 而容器是在它终于回收时才把这条请求的资源还给池子的。
+                    try {
+                        e.complete();
+                    } catch (Exception ignore) {
+                        // 对端已经不在了, 闭合本身不会再成功
+                    }
                 }
             }
         }
@@ -450,6 +459,12 @@ public class McpSessionStore {
                     sent++;
                 } catch (Exception ex) {
                     emitters.remove(e);
+                    // 与 {@link #emit} 同一件事: 光把它从名单里摘掉, 那条异步请求要一直挂到容器超时.
+                    try {
+                        e.complete();
+                    } catch (Exception ignore) {
+                        // 对端已经不在了
+                    }
                 }
             }
             return sent;

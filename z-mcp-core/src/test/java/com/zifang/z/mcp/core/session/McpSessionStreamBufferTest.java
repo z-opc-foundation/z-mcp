@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertEquals;
@@ -334,13 +335,52 @@ public class McpSessionStreamBufferTest {
     @Test
     public void a_stream_that_cannot_be_written_to_is_dropped_by_the_heartbeat() throws Exception {
         McpSessionStore.McpSession s = session(64);
-        s.addEmitter(new Boom());
+        Boom boom = new Boom();
+        s.addEmitter(boom);
         s.addEmitter(new Recorder());
         assertEquals(2, s.emitterCount());
 
         assertEquals("只有那条写得出去的算送达", 1, store.tick());
         assertEquals("写不出去的那条该被摘掉: " + s.emitterCount(), 1, s.emitterCount());
+        assertTrue("摘掉名单不等于收掉请求: 心跳发现的这条死流要当场闭合", boom.completed.get());
         assertEquals("摘完剩下的那条继续收心跳", 1, store.tick());
+    }
+
+    /**
+     * 一次**广播**撞上跑掉的客户端: 死掉的那条要闭合, 活着的那条不能受牵连.
+     *
+     * <p>{@code emit()} 里那次写出是通知路径上唯一会碰到对端的动作, 也是它可能失败的地方。摘掉
+     * emitter 只解决了"别再撞第二次墙", 不解决"那条异步请求还挂在容器上" —— Spring 的 {@code send()}
+     * 在写失败时只置 {@code sendFailed} 并把异常原样抛回来, 不 complete 的话它要一直挂到
+     * {@code sse.timeout-ms} 才走 onTimeout(生产上就是几十个没人读却占着异步上下文的请求)。
+     * 另一半判据同样要有猎物: 摘 emitter 不能顺手把事件本身弄丢, 别的客户端仍然要按那个 id 续得上。
+     */
+    @Test
+    public void a_broadcast_to_a_client_that_hung_up_closes_it_without_disturbing_the_others()
+            throws Exception {
+        McpSessionStore.McpSession s = session(64);
+        Boom boom = new Boom(1);            // 开流那帧写得出去, 之后的广播就撞墙了
+        Recorder live = new Recorder();
+        s.attach(boom, null, "open", 0L);
+        s.attach(live, null, "open", 0L);
+        assertEquals(2, s.emitterCount());
+        long liveKnows = idOf(live.get(0));
+
+        s.emit("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}");
+
+        assertEquals("活着的那条该收到 priming + 通知: " + show(live), 2, live.size());
+        assertTrue("通知要原样落到活着的流上: " + show(live),
+                live.get(1).contains("notifications/tools/list_changed"));
+        assertEquals("写不出的那条该从名单里摘掉: " + s.emitterCount(), 1, s.emitterCount());
+        assertTrue("摘掉的同时要闭合它, 别让异步请求挂到 sse.timeout-ms", boom.completed.get());
+
+        Recorder resumed = new Recorder();
+        assertEquals("那条事件不能跟着 emitter 一起丢: 还留在缓冲里补得上",
+                1, s.attach(resumed, Long.valueOf(liveKnows), "open", 0L));
+        assertTrue("续传补出来的正是跑掉那个客户端没听到的那条: " + show(resumed),
+                dataOf(resumed.get(0)).contains("notifications/tools/list_changed"));
+        assertEquals("补发的 id 还是广播时那个: " + show(resumed),
+                idOf(live.get(1)), idOf(resumed.get(0)));
     }
 
     /**
@@ -380,14 +420,35 @@ public class McpSessionStreamBufferTest {
         return n;
     }
 
-    /** 一个"对端早就不读了"的 emitter: 任何一次写出都炸. */
-    private static final class Boom extends SseEmitter {
+    /**
+     * 一条"从第 {@code diesFrom + 1} 次写出起对端就不读了"的流: 写出每次都炸, 并且记下自己有没有
+     * 被真的收掉。
+     *
+     * <p>{@code diesFrom} 是为广播那条用例留的 —— {@code attach()} 自己就要写一帧 priming,
+     * 一个"从一开始就写不出"的假流根本挂不进名单, 于是测不到"跑掉的客户端"这个真实形状
+     * (流是先开好的, 客户端半路关了)。
+     */
+    private static final class Boom extends Recorder {
+        private final AtomicBoolean completed = new AtomicBoolean();
+        private final int diesFrom;
+        private int sends;
+
         Boom() {
-            super(Long.valueOf(Long.MAX_VALUE));
+            this(0);
+        }
+
+        Boom(int diesFrom) {
+            this.diesFrom = diesFrom;
         }
 
         @Override public void send(SseEventBuilder builder) throws IOException {
-            throw new IOException("client is gone");
+            if (sends++ >= diesFrom) throw new IOException("client is gone");
+            super.send(builder);
+        }
+
+        @Override public void complete() {
+            completed.set(true);
+            super.complete();
         }
     }
 
@@ -441,7 +502,7 @@ public class McpSessionStreamBufferTest {
     }
 
     /** 记账用的 emitter: 把每一帧渲染成 SSE 原文, 于是 id / data / retry 都能按字段断言. */
-    private static final class Recorder extends SseEmitter {
+    private static class Recorder extends SseEmitter {
         Runnable onFirstSend;
         private final List<String> frames = new ArrayList<String>();
 

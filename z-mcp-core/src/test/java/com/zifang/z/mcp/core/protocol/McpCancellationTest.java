@@ -82,6 +82,7 @@ public class McpCancellationTest {
                 Integer.valueOf(McpException.REQUEST_CANCELLED), wire.get("code"));
         assertTrue("客户端给的理由要跟着回来: " + wire,
                 String.valueOf(wire.get("message")).contains("用户按了停止"));
+        awaitInterrupted(gate);
         assertTrue("中断要真的送到工具线程, 而不是等它自己跑完", gate.interrupted);
         assertEquals("跑完的在飞登记必须注销掉", 0, live.session.inFlightCount());
     }
@@ -173,6 +174,7 @@ public class McpCancellationTest {
         Map<String, Object> wire = errorOf(finish(byNumber));
         assertEquals("同型的数字 id 必须命中: " + wire,
                 Integer.valueOf(McpException.REQUEST_CANCELLED), wire.get("code"));
+        awaitInterrupted(numeric);
         assertTrue("命中就要真的中断", numeric.interrupted);
     }
 
@@ -314,6 +316,23 @@ public class McpCancellationTest {
                     gate.enter();
                     return "late";
                 });
+    }
+
+    /**
+     * 等一个由工具体自己置位的中断标志.
+     *
+     * <p>中断是**投递**给另一条线程的, 不是同步发生的: {@code future.cancel(true)} 一返回, 等回执的
+     * 那条线程就能拿到 {@code CancellationException}, 而工具线程可能还没从 {@code await()} 里醒过来 ——
+     * 于是"答案已经出去了、标志还没落下"这段窗口里直接 {@code assertTrue} 会在机器忙的时候偶发红
+     * (GitHub runner 上量到过一次 0.011 秒的红)。这里换成有上限的等待, 判据本身不变:
+     * 中断始终没送到就等满 {@code SETTLE_MS} 然后照样红 —— 摘成 {@code cancel(false)} 的注入探针
+     * 走的正是这条路。
+     */
+    private static void awaitInterrupted(Gate gate) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + SETTLE_MS;
+        while (!gate.interrupted && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10L);
+        }
     }
 
     /** 一次在另一条线程上跑的 {@code tools/call}: 客户端发完请求就去发取消了. */

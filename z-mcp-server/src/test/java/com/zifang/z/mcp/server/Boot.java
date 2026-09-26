@@ -73,26 +73,36 @@ final class Boot {
         }
     }
 
-    /** 轮询到某个条件成立为止; 不成立就把最后一次观察值抛出去(而不是"睡两秒再赌"). */
+    /**
+     * 轮询到某个条件成立为止; 不成立就把**最后一次真读到过**的观察值抛出去(而不是"睡两秒再赌").
+     *
+     * <p>传输错({@code 429 rate limit exceeded}、连接被重置)是**量具自己**读不到状态, 不是被测系统
+     * 给出的事实, 所以它不许覆盖上一次那份目录照片。这条等待每 100 ms 打一次 {@code tools/list},
+     * 两轮等待之间就能把自家的限流预算(默认 300/min)打穿 —— 于是同一个变异体连跑 3 轮会有 2 轮
+     * 的红消息只剩"实得 429", 判红的人看不见当时目录里到底有 12 条还是 18 条, 那条负向断言也就
+     * 从"证据"退化成"运气"。传输错的次数仍然报出来: 它多到一定量时说明这条用例在自撞限流, 那件事
+     * 本身值得知道。
+     */
     static void until(long deadlineMillis, String what, Probe probe) throws Exception {
-        Exception last = null;
-        String observed = "(还没跑过)";
+        Exception lastTransportError = null;
+        int transportErrors = 0;
+        String observed = null;
         while (System.currentTimeMillis() < deadlineMillis) {
             try {
-                observed = probe.inspect();
+                probe.inspect();
                 return;
             } catch (ExpectationPending e) {
-                last = e;
                 observed = e.getMessage();
-                Thread.sleep(100L);
             } catch (Exception e) {
-                last = e;
-                observed = e.toString();
-                Thread.sleep(100L);
+                lastTransportError = e;
+                transportErrors++;
             }
+            Thread.sleep(100L);
         }
-        throw new AssertionError("等不到 " + what + ", 截止前最后一次观察: " + observed
-                + (last == null ? "" : (" / " + last)));
+        throw new AssertionError("等不到 " + what + ", 截止前最后一次观察: "
+                + (observed == null ? "(一次都没读到)" : observed)
+                + (transportErrors == 0 ? "" : (" / 另有 " + transportErrors
+                        + " 次读取失败, 最后一次: " + lastTransportError)));
     }
 
     /** 条件还没成立时抛这个, {@link #until} 才知道要重试而不是判失败. */
