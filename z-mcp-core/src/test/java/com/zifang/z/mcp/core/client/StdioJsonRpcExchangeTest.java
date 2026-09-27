@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zifang.z.mcp.api.dto.CallToolResult;
 import com.zifang.z.mcp.core.properties.McpProperties;
+import com.zifang.z.mcp.core.protocol.McpSchema;
 import com.zifang.z.mcp.core.registry.McpRegistry;
 import org.junit.Test;
 
@@ -247,6 +248,69 @@ public class StdioJsonRpcExchangeTest {
         }
     }
 
+    // ------------------------------------------------------------------ 上游推来的通知
+
+    /**
+     * 上游推来的通知要有落地处. 这一格只问传输: 那一帧有没有带着自己的方法名交到监听方手上,
+     * 以及**交错在一帧通知之后**的那条响应还配不配对得上 id.
+     *
+     * <p>不需要 sleep: reader 是单线程按行派发的, 它先处理通知再处理响应, 而 {@code post()}
+     * 是在响应被派发之后才返回的 —— 所以返回时通知一定已经交出去了.
+     */
+    @Test
+    public void a_pushed_notification_reaches_the_listener_without_breaking_the_pairing()
+            throws Exception {
+        StdioJsonRpcExchange exchange = open(6_000L);
+        AtomicReference<String> seen = new AtomicReference<String>();
+        try {
+            exchange.onUpstreamNotification(new JsonRpcExchange.NotificationListener() {
+                @Override public void onNotification(String method) { seen.set(method); }
+            });
+
+            JsonRpcExchange.Response res = exchange.post(request(33, "push_list_changed", null), null);
+            assertTrue("配错了 id: " + res.body(), res.body().contains("\"id\":33"));
+            // 判"通知没被当成响应"要看帧自己的形状: 通知有 method 没 result, 反过来才是响应.
+            // (不能拿方法名当线索 —— fixture 的回执里就写着那个名字.)
+            assertFalse("把上游推来的通知当成这次请求的响应交出去了: " + res.body(),
+                    res.body().contains("\"method\""));
+            assertTrue(res.body(), res.body().contains("\"result\""));
+            assertEquals("通知没交到监听方手上", McpSchema.N_TOOLS_LIST_CHANGED, seen.get());
+
+            // 交出去之后这条管道仍然转得动
+            assertTrue(exchange.post(request(34, "ping", null), null).body().contains("\"id\":34"));
+        } finally {
+            exchange.close();
+        }
+    }
+
+    /**
+     * 监听方是**别人**注册的回调, 它抛了不能把读侧线程带走: 那条线程一死, 这条传输再也收不到
+     * 任何响应, 而现场只留一行 {@code stdio reader stopped}.
+     *
+     * <p>所以判据不是"有没有异常日志", 而是"下一句话还答不答" —— 摘掉 {@code deliverNotification}
+     * 里那圈 try/catch, 第一条断言就会红在超时上(那一帧通知先派发, 异常会把 reader 一起带走).
+     */
+    @Test
+    public void a_notification_listener_that_throws_cannot_kill_the_reader() throws Exception {
+        StdioJsonRpcExchange exchange = open(2_000L);
+        try {
+            exchange.onUpstreamNotification(new JsonRpcExchange.NotificationListener() {
+                @Override public void onNotification(String method) {
+                    throw new IllegalStateException("listener blew up on " + method);
+                }
+            });
+
+            JsonRpcExchange.Response pushed = exchange.post(request(35, "push_list_changed", null), null);
+            assertTrue("在监听方抛过一次之后, 连推这一帧的请求都没回答了: " + pushed.body(),
+                    pushed.body().contains("\"id\":35"));
+            assertTrue("监听方抛一次就把传输弄聋了: 后面的请求没有回答",
+                    exchange.post(request(36, "ping", null), null).body().contains("\"id\":36"));
+            assertTrue("传输自称还活着但已经答不上话, 状态视图就是假的", exchange.isAlive());
+        } finally {
+            exchange.close();
+        }
+    }
+
     // ------------------------------------------------------------------ 管道与死亡
 
     @Test
@@ -406,11 +470,11 @@ public class StdioJsonRpcExchangeTest {
         }
     }
 
-    /** 端到端: 一行 z.mcp.servers[] 配置 ⇒ 真子进程的工具出现在本地目录里, 并且调得动. */
-    @Test
-    public void the_manager_aggregates_a_real_stdio_server_end_to_end() throws Exception {
+    /** 一行 stdio 配置 ⇒ 把 {@link StdioMcpServerFixture} 当真子进程接进来(走 defaultFactory). */
+    private static ExternalServerManager managerFor(McpRegistry registry,
+                                                    int healthCheckIntervalSeconds) {
         McpProperties properties = new McpProperties();
-        properties.setHealthCheckIntervalSeconds(0);
+        properties.setHealthCheckIntervalSeconds(healthCheckIntervalSeconds);
         McpProperties.ServerConfig config = new McpProperties.ServerConfig();
         config.setName("local-fixture");
         config.setTransport("stdio");
@@ -419,7 +483,12 @@ public class StdioJsonRpcExchangeTest {
         config.setArgs(new ArrayList<String>(command.subList(1, command.size())));
         config.setReadTimeoutMillis(15_000);
         properties.getServers().add(config);
+        return new ExternalServerManager(registry, properties, MAPPER);
+    }
 
+    /** 端到端: 一行 z.mcp.servers[] 配置 ⇒ 真子进程的工具出现在本地目录里, 并且调得动. */
+    @Test
+    public void the_manager_aggregates_a_real_stdio_server_end_to_end() throws Exception {
         McpRegistry registry = new McpRegistry();
         registry.registerBuiltin("get_time", "本机时间", "{\"type\":\"object\"}",
                 new McpRegistry.ToolExecutor() {
@@ -427,8 +496,7 @@ public class StdioJsonRpcExchangeTest {
                         return CallToolResult.text("local-clock");
                     }
                 });
-        ExternalServerManager manager =
-                new ExternalServerManager(registry, properties, MAPPER);
+        ExternalServerManager manager = managerFor(registry, 0);
         try {
             manager.syncAll();
 
@@ -450,6 +518,46 @@ public class StdioJsonRpcExchangeTest {
             CallToolResult local = (CallToolResult) registry.call("get_time", null);
             List<?> localBlocks = (List<?>) local.toWire().get("content");
             assertEquals("local-clock", ((Map<?, ?>) localBlocks.get(0)).get("text"));
+        } finally {
+            manager.destroy();
+        }
+    }
+
+    /**
+     * 上游自己添了一件工具并推来 {@code notifications/tools/list_changed} —— 本地目录要当场跟上,
+     * 而不是最长陈旧一整个健康检查周期.
+     *
+     * <p>这一格量的是<b>整条接线</b>: 配置 → defaultFactory 现造的真子进程 → 读侧收到那一帧 →
+     * 有人把它接到接入器上 → 接入器在另一条线程上重取目录。单元层那些自造 fake 的监听方结构上
+     * 看不见"注册动作压根没发生"和"重同步跑在读侧线程上把自己等死"这两类缺陷, 所以这一条不是重复.
+     *
+     * <p>{@code healthCheckIntervalSeconds=0} 是这条判据的全部力气: 周期清扫那条线程根本不存
+     * 在, 于是后来多出来的那一件工具只可能是被推着去重取的结果.
+     */
+    @Test
+    public void a_pushed_list_changed_grows_the_real_stdio_catalogue_without_a_sweep()
+            throws Exception {
+        McpRegistry registry = new McpRegistry();
+        ExternalServerManager manager = managerFor(registry, 0);
+        try {
+            manager.syncAll();
+            assertFalse("上游还没推, 目录里就已经有它后来那件工具: " + registry.toolNames(),
+                    registry.hasTool("late_arrival"));
+
+            Map<String, Object> args = new LinkedHashMap<String, Object>();
+            args.put("text", "mutate");
+            CallToolResult res = (CallToolResult) registry.call("fixture_echo", args);
+            assertFalse(res.toWire().toString(), res.isError());
+
+            // 重同步跑在 z-mcp-upstream-push 上, 只能等它自己到 —— 有上限, 不是固定 sleep
+            long deadline = System.currentTimeMillis() + 15_000L;
+            while (!registry.hasTool("late_arrival") && System.currentTimeMillis() < deadline) {
+                Thread.sleep(25L);
+            }
+            assertTrue("上游推了 list_changed 而目录里仍然只有: " + registry.toolNames(),
+                    registry.hasTool("late_arrival"));
+            assertEquals("重同步把这条上游弄成不健康了: " + manager.state().get(0),
+                    0, ((Number) manager.health().get("failed")).intValue());
         } finally {
             manager.destroy();
         }

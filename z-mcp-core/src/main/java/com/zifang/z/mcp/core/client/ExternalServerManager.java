@@ -5,6 +5,7 @@ import com.zifang.z.mcp.api.dto.CallToolResult;
 import com.zifang.z.mcp.api.dto.McpServerDto;
 import com.zifang.z.mcp.api.dto.McpToolDto;
 import com.zifang.z.mcp.core.properties.McpProperties;
+import com.zifang.z.mcp.core.protocol.McpSchema;
 import com.zifang.z.mcp.core.registry.McpRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,10 +18,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 外部 MCP server 接入器 — 让 {@code z.mcp.servers[]} 与 {@code healthCheckIntervalSeconds}
@@ -34,6 +37,9 @@ import java.util.concurrent.TimeUnit;
  *   <li>逐个注册进 {@link McpRegistry}(撞名由 registry 加 {@code server__} 前缀)</li>
  *   <li>周期性 healthCheck: 连不上的 server 会**摘掉**它的工具 —— 广告一个调不动的工具
  *       比不广告更糟, 客户端只会拿到一次失败</li>
+ *   <li>上游愿意推的时候不用等到下一轮: 双向管道(stdio)上传来
+ *       {@code notifications/tools/list_changed} 就立刻为**这一台**再走一遍 2—3,
+ *       见 {@link #listenerFor}</li>
  * </ol>
  *
  * <p>单个 server 失败绝不影响其它 server 或本机内置工具: 异常一律记成该 server 的状态.
@@ -53,6 +59,20 @@ public class ExternalServerManager {
     private final ExchangeFactory factory;
     private final Map<String, Managed> managed = new LinkedHashMap<String, Managed>();
     private ScheduledExecutorService scheduler;
+    /**
+     * 事件驱动重同步用的线程池 —— 故意<em>不是</em> {@link #scheduler} 那一台:
+     * 健康检查线程只在 {@code healthCheckIntervalSeconds > 0} 时才存在(见
+     * {@link #startSchedulerIfNeeded()}), 而"上游亲口告诉我目录变了"这件事跟运维有没有
+     * 关掉周期清扫无关. 单线程 + 无界队列(一次 execute 不阻塞), 且每台上游同时最多排一轮.
+     */
+    private final ExecutorService resyncExecutor =
+            Executors.newSingleThreadExecutor(new ThreadFactory() {
+                @Override public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, "z-mcp-upstream-push");
+                    t.setDaemon(true);
+                    return t;
+                }
+            });
     /**
      * {@link #destroy()} 是终点, 不是"暂时停一下". 首轮同步跑在守护线程里, 它完全可能在
      * 容器已经关闭之后才抢到这把锁 —— 而 {@code scheduler = null} 会把
@@ -135,6 +155,12 @@ public class ExternalServerManager {
         try {
             if (m.client == null) {
                 JsonRpcExchange exchange = factory.create(config);
+                if (exchange instanceof JsonRpcExchange.PushCapable) {
+                    // 注册点放在这里而不是 client 里: 传输由这台 manager 亲手造出来,
+                    // 而"目录变了要做什么"是接入器的决定, 不是管道的.
+                    ((JsonRpcExchange.PushCapable) exchange)
+                            .onUpstreamNotification(listenerFor(m));
+                }
                 m.client = new McpRemoteClient(name, config, exchange, mapper,
                         properties.getServerName(), properties.getServerVersion());
             }
@@ -326,6 +352,51 @@ public class ExternalServerManager {
         }
     }
 
+    // ---------------------------------------------------------- 上游推来的目录变更
+
+    /**
+     * 上游亲口说"我的工具表变了"时, 不要等到下一轮健康检查才去重取.
+     *
+     * <p>这个回调跑在**传输的读侧线程**上(stdio 就是那条 {@code z-mcp-stdio-reader}), 那里
+     * 是这条链路唯一的收字人 —— 在它上面做任何一次往返都会把后面所有响应堵在自己等的那一帧
+     * 之前(自己等自己读, 只能读到超时). 所以这里只做两件事: 记一笔"这台脏了", 和把活交给
+     * {@link #resyncExecutor}.
+     *
+     * <p>合并靠 {@link Managed#resyncPending} 的那一次 CAS: 抢到的那一票才下单, 于是上游连推
+     * 五帧也只多跑一轮 —— 而不是五轮 {@code tools/list}. 标记由任务自己**先清再同步**,
+     * 清在同步之前是为了: 同步期间又来一帧时它必须重新排上下一次, 否则那一帧就丢了.
+     *
+     * <p>为什么不会被一个爱推的上游拖着空转: 重同步复用现有连接(不重新 initialize),
+     * 而只在握手时推一帧的那种上游正是因为"我们在重连"才会推 —— 这条路在这里断掉.
+     */
+    private JsonRpcExchange.NotificationListener listenerFor(final Managed m) {
+        return new JsonRpcExchange.NotificationListener() {
+            @Override public void onNotification(String method) {
+                if (!McpSchema.N_TOOLS_LIST_CHANGED.equals(method)) {
+                    // 资源/prompt 的目录通知我们没有对应可重取的东西(只聚合 tools), 其它类目同理
+                    log.debug("mcp server {} pushed {}, 本接入器不吃这一类通知",
+                            m.serverName, method);
+                    return;
+                }
+                if (!m.resyncPending.compareAndSet(false, true)) return;
+                log.info("mcp server {} announced {} — 立刻重取目录, 不等健康检查周期",
+                        m.serverName, method);
+                resyncExecutor.execute(new Runnable() {
+                    @Override public void run() {
+                        m.resyncPending.set(false);
+                        resyncNow(m);
+                    }
+                });
+            }
+        };
+    }
+
+    /** 与周期清扫走同一条互斥: {@link #managed} 与 {@link McpRegistry} 都是共享状态. */
+    private synchronized void resyncNow(Managed m) {
+        if (destroyed) return;
+        syncOne(m.config);
+    }
+
     // ------------------------------------------------------------------ 健康检查
 
     private void startSchedulerIfNeeded() {
@@ -355,6 +426,8 @@ public class ExternalServerManager {
             scheduler.shutdownNow();
             scheduler = null;
         }
+        // 事件驱动那一路也要停: 已经排在队列里的任务由 resyncNow 的 destroyed 判据挡住
+        resyncExecutor.shutdownNow();
         for (Managed m : managed.values()) detach(m, "shutting down");
     }
 
@@ -423,6 +496,8 @@ public class ExternalServerManager {
         volatile long lastSyncMillis;
         /** 上一次发布出去的上游目录内容, 用来判断这一轮要不要真的动目录. */
         String publishedSignature;
+        /** 上游推了目录变更、而这一轮重同步还没开始 —— 见 {@link #listenerFor}, 合并重复推送就靠它. */
+        final AtomicBoolean resyncPending = new AtomicBoolean();
 
         Managed(String serverName) { this.serverName = serverName; }
     }

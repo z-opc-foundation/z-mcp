@@ -12,7 +12,8 @@ import java.io.PrintWriter;
  * 不依赖 surefire 把 jackson 摆在 java.class.path 上(它可能只放一个 booter jar).
  *
  * <p>它演的是真实上游会做的那些"烦人但合法"的事: 在响应前插通知、插一个别的 id 的响应、
- * 把 stderr 写爆、直接退出、以及干脆不回答.
+ * 把 stderr 写爆、直接退出、干脆不回答、以及自己添了一件工具之后推一帧
+ * {@code notifications/tools/list_changed} 就不再管它(客户端得自己重取).
  *
  * <p>{@code push_then_wait} 演的是另一类: 上游反过来**请求**客户端. 协议里客户端要回话
  * (ping 回空 result, 做不了的回 -32601), 所以这里写完就**真的 readLine 等回执** ——
@@ -26,6 +27,16 @@ public final class StdioMcpServerFixture {
 
     /** 握手那一帧的原样字节 —— 管道那头到底收到了什么承诺, 由它作证. */
     private static String initializeFrame;
+
+    /** 上游自己加了工具并推了 {@code notifications/tools/list_changed} —— 目录从此换一份. */
+    private static boolean mutated;
+
+    /** 收到过几次 {@code tools/list}: 事件驱动的重同步有没有合并成一轮, 由它作证. */
+    private static int toolsListCount;
+
+    /** 上游改了工具表时推的那一帧: 协议里它没有 id, 所以不该换来任何回答. */
+    private static final String LIST_CHANGED =
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}";
 
     public static void main(String[] argv) throws Exception {
         BufferedReader in = new BufferedReader(
@@ -52,17 +63,34 @@ public final class StdioMcpServerFixture {
                         + "\"serverInfo\":{\"name\":\"stdio-fixture\",\"version\":\"1\"},"
                         + "\"capabilities\":{\"tools\":{}}}");
             } else if ("tools/list".equals(method)) {
+                toolsListCount++;
                 reply(out, id, "{\"tools\":["
                         + "{\"name\":\"fixture_echo\",\"description\":\"回声\","
                         + "\"inputSchema\":{\"type\":\"object\",\"properties\":"
                         + "{\"text\":{\"type\":\"string\"}}}},"
                         + "{\"name\":\"get_time\",\"description\":\"和内置工具撞名\","
                         + "\"inputSchema\":{\"type\":\"object\"}}"
+                        + (mutated ? ",{\"name\":\"late_arrival\",\"description\":\"推送之后才有的\","
+                                + "\"inputSchema\":{\"type\":\"object\"}}" : "")
                         + "],\"nextCursor\":\"\"}");
             } else if ("tools/call".equals(method)) {
                 String text = field(line, "text");
+                if ("mutate".equals(text)) {
+                    // 上游自己往目录里添了一件, 并且照协议推一帧通知 —— 它不会替我们再去 list 一次.
+                    mutated = true;
+                    out.println(LIST_CHANGED);
+                    out.flush();
+                }
                 reply(out, id, "{\"content\":[{\"type\":\"text\",\"text\":\"echo:"
                         + (text == null ? "?" : text) + "\"}]}");
+            } else if ("push_list_changed".equals(method)) {
+                // 只推不涨: 用来量"通知到没到监听方"和"这条管道推完还转不转得动", 不掺目录变化
+                out.println(LIST_CHANGED);
+                out.flush();
+                reply(out, id, "{\"pushed\":\"notifications/tools/list_changed\"}");
+            } else if ("report_counts".equals(method)) {
+                reply(out, id, "{\"toolsList\":" + Integer.valueOf(toolsListCount)
+                        + ",\"mutated\":" + Boolean.valueOf(mutated) + "}");
             } else if ("stderr_flood".equals(method)) {
                 // 管道缓冲通常只有 64KB: 没人读 stderr 就会在这里写死
                 StringBuilder sb = new StringBuilder();

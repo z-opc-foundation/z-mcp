@@ -34,8 +34,11 @@ import java.util.concurrent.TimeUnit;
  * <p>读侧还有一条反过来的责任: 上游也可以向我们**发请求**(ping, 或任何它以为我们支持的方法 ——
  * 握手已不再广告 client 侧做不到的能力(#46), 但协议不允许我们假定对端因此就不问),
  * 而在这条链路上我们是 client —— 不该答的要闭嘴, 该答的一句都不能拖, 见 {@link #answerIfRequest}.
+ * 上游推来的**通知**(没 id)既不能答也不该丢在地上: 交给 {@link JsonRpcExchange.PushCapable}
+ * 的监听方, 由它决定"目录变了要不要现在去重取"(见 {@link #deliverNotification}).
  */
-public final class StdioJsonRpcExchange implements JsonRpcExchange, Closeable {
+public final class StdioJsonRpcExchange
+        implements JsonRpcExchange, JsonRpcExchange.PushCapable, Closeable {
 
     private static final Logger log = LoggerFactory.getLogger(StdioJsonRpcExchange.class);
     private static final Charset UTF8 = Charset.forName("UTF-8");
@@ -47,6 +50,8 @@ public final class StdioJsonRpcExchange implements JsonRpcExchange, Closeable {
     private final Map<Long, Awaiter> pending = new ConcurrentHashMap<Long, Awaiter>();
     private volatile boolean closed;
     private volatile String exitNote;
+    /** 注册动作发生在读侧线程已经跑起来之后, 所以这个字段必须 volatile. */
+    private volatile JsonRpcExchange.NotificationListener notificationListener;
 
     public StdioJsonRpcExchange(List<String> command, ObjectMapper mapper, long requestTimeoutMillis)
             throws IOException {
@@ -194,6 +199,11 @@ public final class StdioJsonRpcExchange implements JsonRpcExchange, Closeable {
         }
     }
 
+    @Override
+    public void onUpstreamNotification(JsonRpcExchange.NotificationListener listener) {
+        this.notificationListener = listener;
+    }
+
     private void dispatch(String raw) {
         String trimmed = raw.trim();
         if (trimmed.isEmpty()) return;
@@ -208,17 +218,43 @@ public final class StdioJsonRpcExchange implements JsonRpcExchange, Closeable {
         // 一并归进"没人认领的响应"那一格, 于是这一条链路永远回不了话(见 answerIfRequest).
         JsonNode method = node.get("method");
         if (method != null && !method.isNull()) {
-            answerIfRequest(node, method.asText());
+            JsonNode id = node.get("id");
+            if (id == null || id.isNull()) deliverNotification(method.asText());
+            else answerIfRequest(node, method.asText());
             return;
         }
+        // 到这里已经没有通知了(有 method 的都在上面那支交出去了), 剩下的只有响应帧:
+        // 配不上等待槽的那一种就是"没人认领的响应".
         JsonNode id = node.get("id");
-        if (id == null || !id.canConvertToLong()) return;      // 通知帧: 没人等, 也不需要有人等
+        if (id == null || !id.canConvertToLong()) return;
         Awaiter awaiter = pending.remove(id.asLong());
         if (awaiter == null) {
             log.debug("stdio server sent an unsolicited response id={}", id);
             return;
         }
         awaiter.complete(trimmed);
+    }
+
+    /**
+     * 上游推来一条通知(有 method、没有 id)—— 协议上它不该有回答, 也不该没人知道.
+     *
+     * <p>"没有回答"这一半 {@code StdioJsonRpcExchangeTest} 里有用具盯: 给一帧响应会把孩子
+     * 的记录污染成"客户端答错了对象"(fixture 的 {@code report_spurious} 那一格).
+     *
+     * <p>回调里抛出来的异常必须在这里吃掉: 这条线程是这条传输**唯一**的收字人, 它一死,
+     * 后面的每个请求都只能等到读超时, 而现场只留一行 reader stopped.
+     */
+    private void deliverNotification(String method) {
+        JsonRpcExchange.NotificationListener listener = notificationListener;
+        if (listener == null) {
+            log.debug("stdio server pushed {} which nobody subscribed to", method);
+            return;
+        }
+        try {
+            listener.onNotification(method);
+        } catch (RuntimeException e) {
+            log.warn("stdio notification listener failed for {}: {}", method, e.toString());
+        }
     }
 
     /**
@@ -232,7 +268,8 @@ public final class StdioJsonRpcExchange implements JsonRpcExchange, Closeable {
      *       它随时有权问) ——
      *       回 {@code -32601 Method not found}, 与参照实现 {@code Protocol._onrequest} 的做法一致:
      *       对端当场就能继续干活, 而且知道是哪条路走不通, 而不是白等一整个它的超时.</li>
-     *   <li>没有 id 的帧是通知, 无从应答, 也不该编一个 id 出来.</li>
+     *   <li>没有 id 的帧是通知 —— 那一支由调用方(dispatch)分给 {@link #deliverNotification},
+     *       到这里的一定是有 id 的请求.</li>
      * </ul>
      *
      * <p>id 原样回显(数字或字符串都可能), 整个回执用 ObjectNode 组而不是拼字符串 ——
@@ -240,7 +277,6 @@ public final class StdioJsonRpcExchange implements JsonRpcExchange, Closeable {
      */
     private void answerIfRequest(JsonNode frame, String method) {
         JsonNode id = frame.get("id");
-        if (id == null || id.isNull()) return;
         ObjectNode reply = mapper.createObjectNode();
         reply.put("jsonrpc", "2.0");
         reply.set("id", id);

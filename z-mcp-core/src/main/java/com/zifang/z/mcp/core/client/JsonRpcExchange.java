@@ -31,6 +31,29 @@ public interface JsonRpcExchange {
         return true;
     }
 
+    /**
+     * 上游可以**反过来推帧进来**的传输 —— 与 {@code McpRemoteClient.DeleteCapable} 同样是
+     * "传输能力由实现方声明、调用方 instanceof 发现".
+     *
+     * <p>只有双向管道(stdio)做得到: HTTP 那一路一次 POST 配一次响应, 除此之外没有任何常驻读流
+     * (hub 也不为上游开 GET 流), 结构上没有一条能让上游随时开口的通道. 所以"上游推了目录变更"
+     * 这件事在 http 上游那里根本无法发生, 不是实现漏了.
+     */
+    interface PushCapable {
+        /** 之后每一帧"有 method、无 id"都会交给这个监听方. 覆盖旧值, 传 null 等于取消. */
+        void onUpstreamNotification(NotificationListener listener);
+    }
+
+    /**
+     * 收到上游推送.
+     *
+     * <p><b>实现方会在传输的读侧线程上被调用</b>, 那里一停全家停: 阻塞在这条线程上的
+     * 每一毫秒里, 所有在等的响应都拿不到回答. 只能记账, 活交给别的线程去干.
+     */
+    interface NotificationListener {
+        void onNotification(String method);
+    }
+
     /** 响应. headers 的 key 一律小写, 因为 HTTP 头大小写不敏感. */
     final class Response {
         private final int status;

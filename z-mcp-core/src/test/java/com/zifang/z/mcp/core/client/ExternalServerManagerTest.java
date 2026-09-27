@@ -3,6 +3,7 @@ package com.zifang.z.mcp.core.client;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zifang.z.mcp.api.dto.CallToolResult;
 import com.zifang.z.mcp.core.properties.McpProperties;
+import com.zifang.z.mcp.core.protocol.McpSchema;
 import com.zifang.z.mcp.core.registry.McpRegistry;
 import org.junit.Test;
 
@@ -15,10 +16,13 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -34,7 +38,7 @@ public class ExternalServerManagerTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
 
-    private static final class FakeExchange implements JsonRpcExchange {
+    private static class FakeExchange implements JsonRpcExchange {
         final List<String> bodies = new ArrayList<String>();
         final Deque<JsonRpcExchange.Response> script =
                 new ArrayDeque<JsonRpcExchange.Response>();
@@ -57,6 +61,53 @@ public class ExternalServerManagerTest {
 
         /** stdio 的覆写就是这个语义: 关掉、或对面进程没了, 都不再是活的传输. */
         @Override public boolean isAlive() { return alive && !closed; }
+
+        int listCalls() {
+            int n = 0;
+            for (String b : bodies) if (b.contains("\"tools/list\"")) n++;
+            return n;
+        }
+    }
+
+    /**
+     * 能像 stdio 那样被上游反向推一条的传输 —— 走的正是 {@link JsonRpcExchange.PushCapable}
+     * 这一个能力面, 所以"manager 有没有去装监听方"这件事在本用例里是**可见的**:
+     * {@link #push} 在 listener 缺席时当场就红, 而不是静悄悄地什么也没发生.
+     */
+    private static final class NotifyExchange extends FakeExchange
+            implements JsonRpcExchange.PushCapable {
+
+        /** 每一次 post 落在哪条线程上(按对象身份记) —— 重同步跑错了线程由它现形. */
+        final List<Thread> postThreads =
+                java.util.Collections.synchronizedList(new ArrayList<Thread>());
+        private JsonRpcExchange.NotificationListener listener;
+        volatile CountDownLatch enteredResync;
+        volatile CountDownLatch releaseResync;
+
+        @Override public void onUpstreamNotification(JsonRpcExchange.NotificationListener l) {
+            listener = l;
+        }
+
+        void push(String method) {
+            assertNotNull("manager 没有把监听方装到这条可被推的传输上(注册点丢了?)", listener);
+            listener.onNotification(method);
+        }
+
+        @Override public JsonRpcExchange.Response post(String body, Map<String, String> header)
+                throws IOException {
+            postThreads.add(Thread.currentThread());
+            if (body.contains("\"tools/list\"") && enteredResync != null) {
+                enteredResync.countDown();
+                try {
+                    // 上限是安全阀不是判据: 重同步若被写在推帧的那条线程上(变异体), 卡在这里的
+                    // 就是测试线程自己, 只有超时能把它放出来 —— 所以这个数要小.
+                    if (releaseResync != null) releaseResync.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return super.post(body, header);
+        }
     }
 
     private final class Fixture {
@@ -107,6 +158,13 @@ public class ExternalServerManagerTest {
             server(name);
             FakeExchange e = upstream(name);
             e.unreachable = true;
+            return e;
+        }
+
+        /** 一条"上游能反向推帧进来"的传输 —— stdio 的那一类能力面. */
+        NotifyExchange notifying(String name) {
+            NotifyExchange e = new NotifyExchange();
+            pre.put(name, e);
             return e;
         }
 
@@ -796,5 +854,160 @@ public class ExternalServerManagerTest {
         resurrected.removeAll(first);
         assertTrue("destroy 是终点, 但一次迟到的 syncAll 又把周期线程起回来了: "
                 + namesOf(resurrected), resurrected.isEmpty());
+    }
+
+    // ------------------------------------------------------ 上游推来的目录变更(#47)
+
+    /** 等一条异步重同步落到目录里 —— 有上限的轮询, 不是固定 sleep. */
+    private static void awaitTool(McpRegistry registry, String tool) throws Exception {
+        long deadline = System.currentTimeMillis() + 10_000L;
+        while (!registry.hasTool(tool) && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20L);
+        }
+    }
+
+    /**
+     * 等"重同步不再往这条传输上发请求", 返回这之后一共发了几发.
+     *
+     * <p>连续两次数到同一个值(且中间隔了 300ms)才算静下来. 注意这个窗口只会朝"少数了几轮"的方向
+     * 出偏差, 而少数的读数照样满足 {@code <=} 的断言 —— 所以它不会假红, 只可能放过.
+     */
+    private static int awaitQuiet(FakeExchange exchange, int from) throws Exception {
+        long deadline = System.currentTimeMillis() + 8_000L;
+        int last = from;
+        while (System.currentTimeMillis() < deadline) {
+            Thread.sleep(300L);
+            int now = exchange.listCalls();
+            if (now == last) return now;
+            last = now;
+        }
+        return last;
+    }
+
+    /**
+     * 上游推一帧 {@code notifications/tools/list_changed}, 本地目录要立刻跟上.
+     *
+     * <p>这里的判据力气全在 {@code healthCheckIntervalSeconds=0}: 这一台 manager 上**没有**周期
+     * 清扫线程(整批 {@code Fixture()} 用例都是 0), 所以"目录里多了东西"只可能是被推着去重取的
+     * 结果, 而不是恰好撞上了一轮 healthCheck.
+     *
+     * <p>反向的两半: 只重取被推的那一台(否则一台上游闹一下全机器都跟着翻页), 和不吃的那一类通知
+     * 一帧都不许换成一次往返. 后半一度写成"再推一条该吃的, 若前一条也被收下了则计数必然多一轮" ——
+     * 变异体 M4(摘掉类目过滤)当场证明这把尺是空的: 两帧挨得近时合并本来就把它们并成同一轮,
+     * 摘与不摘都是 before+1. 现在改成在同一把门上取双向证据, 见下面那段注释.
+     */
+    @Test
+    public void a_pushed_list_changed_resyncs_that_one_server_without_the_health_sweep()
+            throws Exception {
+        Fixture f = new Fixture();
+        f.server("acme");
+        f.server("other");
+        NotifyExchange acme = f.notifying("acme");
+        handshake(acme, "s1");
+        toolsPage(acme, "[{\"name\":\"echo\"}]");
+        FakeExchange other = f.upstream("other");
+        handshake(other, "s2");
+        toolsPage(other, "[{\"name\":\"far_away\"}]");
+
+        try {
+            f.manager.syncAll();
+            assertTrue(f.registry.hasTool("echo"));
+            assertFalse(f.registry.hasTool("late_tool"));
+            int acmeLists = acme.listCalls();
+            int otherCalls = other.listCalls();
+
+            toolsPage(acme, "[{\"name\":\"echo\"},{\"name\":\"late_tool\"}]");
+            acme.push(McpSchema.N_TOOLS_LIST_CHANGED);
+            awaitTool(f.registry, "late_tool");
+            assertTrue("上游推了 list_changed 而目录里仍然只有: " + f.registry.toolNames(),
+                    f.registry.hasTool("late_tool"));
+            assertEquals("一帧推送引起了不止一轮重取: ", acmeLists + 1, acme.listCalls());
+            assertEquals("推给 acme 却把别台也重取了一遍(一台上游闹一下, 全机器跟着翻页): ",
+                    otherCalls, other.listCalls());
+
+            // 反向: resources 那一类的目录变更与本接入器无关(只聚合 tools), 一帧都不许换成一次往返.
+            // "少一轮"是数不出来的 —— 两帧挨得够近时合并本来就会把它们并成同一轮(合并正是下一条
+            // 用例要钉的东西), 摘掉类目过滤照样满足 before+1. 所以这里换成门: 有没有走到 post
+            // 是当场可见的, 并在**同一把门**上补一条阳性对照 —— 先证明推 tools 时它一定响,
+            // 才说明推 resources 时没响, 而不是那把门本来就什么都测不到.
+            int before = acme.listCalls();
+            acme.enteredResync = new CountDownLatch(1);
+            acme.releaseResync = new CountDownLatch(1);
+            toolsPage(acme, "[{\"name\":\"echo\"},{\"name\":\"late_tool\"},"
+                    + "{\"name\":\"later_tool\"}]");
+            try {
+                acme.push(McpSchema.N_RESOURCES_LIST_CHANGED);
+                assertFalse("resources/list_changed 引起了重取: 本接入器只吃 tools 那一类通知",
+                        acme.enteredResync.await(2, TimeUnit.SECONDS));
+                acme.push(McpSchema.N_TOOLS_LIST_CHANGED);
+                assertTrue("同一把门在推 tools/list_changed 时也没响 ⇒ 上面那句 assertFalse 是空跑出来的",
+                        acme.enteredResync.await(10, TimeUnit.SECONDS));
+            } finally {
+                acme.releaseResync.countDown();
+            }
+            awaitTool(f.registry, "later_tool");
+            assertEquals("resources/list_changed 被当成了 tools 的变更: ", before + 1,
+                    acme.listCalls());
+        } finally {
+            // 关掉那条为推送而起的线程: 它活着的话, 按对象身份比的那条用例会被牵连
+            f.manager.destroy();
+        }
+    }
+
+    /**
+     * 连推五帧要合并成一轮, 而且重同步一条都不许跑在**推来的那条线程**上.
+     *
+     * <p>后半句才是这条用例的主要目的: stdio 的读侧线程是那条传输唯一的收字人, 在它上面做一次
+     * 往返 = 自己等自己读, 那一发 {@code tools/list} 只能读到超时 —— 现场看起来却只是"重同步没
+     * 生效". 所以这里把重同步卡在 {@code post} 里, 记下每次 post 落在哪条线程, 再和推的那条比.
+     *
+     * <p>合并的上界是"至多两轮"而不是恰好一轮: 标记必须先清再同步(否则同步期间来的那一帧就丢了),
+     * 于是紧跟在清标记之后的那一帧有权利再排一轮. 摘掉 CAS 就是五轮 —— 那才是这条要抓的东西.
+     */
+    @Test
+    public void repeated_pushes_coalesce_and_never_run_on_the_pushing_thread() throws Exception {
+        Fixture f = new Fixture();
+        f.server("acme");
+        NotifyExchange acme = f.notifying("acme");
+        handshake(acme, "s1");
+        toolsPage(acme, "[{\"name\":\"echo\"}]");
+        f.manager.syncAll();
+        int initial = acme.listCalls();
+        acme.postThreads.clear();                       // 只看事件驱动那几发落在哪条线程
+
+        for (int page = 0; page < 6; page++) {
+            toolsPage(acme, "[{\"name\":\"echo\"},{\"name\":\"late_" + page + "\"}]");
+        }
+        acme.enteredResync = new CountDownLatch(1);
+        acme.releaseResync = new CountDownLatch(1);
+        try {
+            acme.push(McpSchema.N_TOOLS_LIST_CHANGED);
+            assertTrue("重同步根本没开始(一轮都没跑)",
+                    acme.enteredResync.await(10, TimeUnit.SECONDS));
+            // 第一轮还卡在 post 里, 这四帧就该并到它后面去, 而不是各排一轮
+            for (int i = 0; i < 4; i++) acme.push(McpSchema.N_TOOLS_LIST_CHANGED);
+        } finally {
+            acme.releaseResync.countDown();            // 无论断言结果如何都不把那条线程卡在门里
+        }
+
+        // 先比线程身份(结构性判据, 当场定论), 再数轮次(awaitQuiet 只会少数, 是时间耦合的那一半)
+        assertFalse("重同步一条都没跑", acme.postThreads.isEmpty());
+        for (Thread t : acme.postThreads) {
+            assertNotSame("重同步跑回了推它的那条线程(stdio 上就是读侧线程: 自己等自己读, 只能读到超时)",
+                    Thread.currentThread(), t);
+        }
+
+        int rounds = awaitQuiet(acme, initial) - initial;
+        assertTrue("五帧推送合并后仍然跑了 " + rounds + " 轮", rounds <= 2);
+
+        // destroy 是终点: 那条为推送而起的线程不能留在机器上(同 JVM 里每关启一次留一条),
+        // 判据按**对象身份**比而不是数名字 —— 别的用例留着的同名线程不该算到这台 manager 头上.
+        List<Thread> spawned = new ArrayList<Thread>(acme.postThreads);
+        f.manager.destroy();
+        for (Thread t : spawned) {
+            t.join(3_000L);
+            // 有上限的 join: 无界的等只会把"忘了关线程池"的变异从判红变成挂死, 把量具一起拖走.
+            assertFalse("destroy() 之后这条重同步线程还在: 线程池没关", t.isAlive());
+        }
     }
 }
