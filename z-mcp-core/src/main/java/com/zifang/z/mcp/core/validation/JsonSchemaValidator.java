@@ -17,9 +17,17 @@ import java.util.regex.PatternSyntaxException;
  *
  * <p>覆盖 MCP 工具 schema 实际会用到的关键字: type / required / properties /
  * items (单份 schema、布尔、**数组形式**三种) / prefixItems / additionalItems /
- * enum / const / additionalProperties / minimum / maximum / minLength / maxLength /
+ * enum / const / additionalProperties / minimum / maximum / exclusiveMinimum /
+ * exclusiveMaximum / multipleOf / minLength / maxLength /
  * pattern / minItems / maxItems / nullable, 外加 refs 与组合子: $ref / $defs /
  * definitions / allOf / anyOf / oneOf / not.
+ *
+ * <p>数值那一族原本只有含等号的半条 (minimum / maximum), 不含等号的那一头与步长一起躺在
+ * "未知关键字不作约束"里 ⇒ 广告「必须 &gt; 0」的参数, 传 0 照过; 广告「只能是 5 的倍数」的传 11 照过.
+ * 这一族同样是真客户端交上来的形状, 而且两家参照都判它: tsclient/ref51_num_oracle.js (ajv 8.20.0
+ * × 双方言 47 格) 与 ref51_num_oracle.py (jsonschema 4.26.0 × 双方言 50 格), 逐格对拍由
+ * ref51_crossdiff.py 现算 —— 跨实现、同方言的 94 格里只有 draft-04 布尔写法那 2 格分叉,
+ * 而那 2 格是"参照自己不同意"的地方, 立场写在 checkNumber 的注释里.
  *
  * <p>后一组不是"顺手做的完备性": 两份官方 SDK 生成的 schema 主要约束就住在里面.
  * python SDK 1.27.1 + pydantic 2 把嵌套模型交成
@@ -449,6 +457,37 @@ public class JsonSchemaValidator {
         JsonNode max = schema.get("maximum");
         if (max != null && max.isNumber() && v > max.asDouble()) {
             errors.add(path + ": " + literal(node) + " > maximum " + max.asDouble());
+        }
+        // exclusiveMinimum / exclusiveMaximum 是同一族里**不含等号**的那一头: 旧版只做了上面两条,
+        // 于是广告「必须 > 0」的参数, 0 照过. 真生产者就交这个形状 —— 官方 python SDK 1.27.1 +
+        // pydantic 2.12.5 的 `Field(gt=0)` 交 {"exclusiveMinimum":0}, zod 4.6.5 的 `z.number().gt(0)`
+        // 在 draft-07 与 2020-12 两个 target 下都交同一份数值写法 (ref51_py_wire.log 现读;
+        // tsclient/ref51_num_oracle.js 头部记着 zod 那侧的逐格输出).
+        // 真值: ajv 8.20.0 × 两方言 与 jsonschema 4.26.0 × 两方言, 跨实现同方言共有的 94 格里
+        // 只有 draft-04 的布尔写法那 2 格分叉 (ref51_crossdiff.py 现算并加双向闸).
+        // 那 2 格我们站 jsonschema 一侧: 值不配当数值 ⇒ 这条不参与, 与上面 minimum/maximum 用的
+        // `isNumber()` 同一条 house rule —— ajv 是在 compile 阶段直接把整份 schema 抛掉的,
+        // 那是"拒绝这份 schema"而不是"这个实例违规", 与本方法的返回形状(实例级违规清单)不同类.
+        JsonNode exMin = schema.get("exclusiveMinimum");
+        if (exMin != null && exMin.isNumber() && v <= exMin.asDouble()) {
+            errors.add(path + ": " + literal(node) + " is not > exclusiveMinimum " + exMin.asDouble());
+        }
+        JsonNode exMax = schema.get("exclusiveMaximum");
+        if (exMax != null && exMax.isNumber() && v >= exMax.asDouble()) {
+            errors.add(path + ": " + literal(node) + " is not < exclusiveMaximum " + exMax.asDouble());
+        }
+        // multipleOf 取"商的小数部分"而不是"余数", 因为参照两家都是这么判的: {multipleOf:1e-8} 遇 1,
+        // 两份参照都说**过**, 而 `1.0 % 1e-8` 在 IEEE double 上是 9.99999997907744e-9 (非零) ⇒
+        // 写成余数形式会凭空多判一条红. 反过来 {multipleOf:0.1} 遇 0.3 两家都判红,
+        // `(0.3/0.1)%1` = 0.9999999999999996 正是非零 —— 所以这一格不是"参照容忍了浮点误差",
+        // 而是它们真的在问"除得尽吗". 除数为 0 时商是 NaN, `NaN != 0` 成立 ⇒ 判违规, 与 ajv 同档
+        // (jsonschema 那侧直接 RAISED ZeroDivisionError, 也归 RED 一档).
+        JsonNode step = schema.get("multipleOf");
+        if (step != null && step.isNumber()) {
+            double quotientRemainder = (v / step.asDouble()) % 1.0;
+            if (quotientRemainder != 0.0) {
+                errors.add(path + ": " + literal(node) + " is not a multiple of " + step.asDouble());
+            }
         }
     }
 

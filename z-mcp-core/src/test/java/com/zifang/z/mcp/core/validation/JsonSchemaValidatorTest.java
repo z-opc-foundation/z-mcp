@@ -712,4 +712,175 @@ public class JsonSchemaValidatorTest {
                         "{\"k\":2}").isEmpty());
         assertOk("{\"type\":\"object\",\"additionalProperties\":{\"const\":1}}", "{\"k\":1,\"j\":1}");
     }
+
+    // =====================================================================
+    // #51: 数值约束里"不含等号的那一头"与"步长"
+    //
+    // minimum / maximum 一直是认的, 而 exclusiveMinimum / exclusiveMaximum / multipleOf 躺在
+    // "未知关键字不作约束"的政策里 ⇒ 广告「必须 > 0」的参数传 0 照过, 广告「只能是 5 的倍数」的传 11 照过.
+    // 期望值不来自规范文本, 来自两份参照 × 两方言的逐格读数:
+    //   ajv 8.20.0        tsclient/ref51_num_oracle.js → .log (双方言各 47 格)
+    //   jsonschema 4.26.0 ref51_num_oracle.py → _py.log       (双方言各 50 格)
+    // "跨实现、同方言的 94 格里只有 draft-04 布尔写法那 2 格分叉"由 ref51_crossdiff.py 现算
+    // (例外名单是双向闸: 名单外分叉即 FATAL, 名单内不再分叉也 FATAL).
+    // 病相来自线上而不是设想: pydantic 2.12.5 的 Field(gt=0) 交 {"exclusiveMinimum":0}、
+    // Field(multiple_of=5) 交 {"multipleOf":5}, 且 Optional 会把它包进 anyOf ——
+    // 那一份 wire 字节现读自 ref51_py_wire.py (下面第一支用的就是它交的原样形状).
+    // =====================================================================
+
+    @Test
+    public void a_strict_bound_from_a_real_client_actually_excludes_the_boundary() throws Exception {
+        // 这三份 schema 是 ref51_py_wire.log 里 `scale` / `pick_range` / `sized` 的原样字节, 一个字段没改.
+        String floor = "{\"exclusiveMinimum\":0,\"title\":\"Floor Gt\",\"type\":\"integer\"}";
+        List<String> atZero = errorsOf(floor, "0");
+        assertFalse("Field(gt=0) 的 0 照过", atZero.isEmpty());
+        assertTrue("要报在 exclusiveMinimum 上: " + atZero,
+                countMatches(atZero, "exclusiveMinimum") == 1);
+        assertOk(floor, "1");
+        assertFalse(errorsOf(floor, "-1").isEmpty());
+
+        String span = "{\"exclusiveMaximum\":1.0,\"minimum\":0.0,\"title\":\"Lo\",\"type\":\"number\"}";
+        assertFalse("Field(ge=0, lt=1) 的 1.0 照过", errorsOf(span, "1.0").isEmpty());
+        assertOk(span, "0.0");   // 含等号的那一头仍然按 minimum 判
+        assertOk(span, "0.5");
+
+        // Optional 包出来的 anyOf: 严格下界住在分支里, 而 null 走另一支 —— 两条都要成立,
+        // 只有一条的"认得"在真实客户端里等于没认.
+        String opt = "{\"anyOf\":[{\"exclusiveMinimum\":100,\"type\":\"integer\"},{\"type\":\"null\"}],"
+                + "\"default\":null,\"title\":\"Maybe Big\"}";
+        assertFalse("anyOf 分支里的 exclusiveMinimum 没生效", errorsOf(opt, "100").isEmpty());
+        assertOk(opt, "null");
+        assertOk(opt, "101");
+    }
+
+    @Test
+    public void strict_and_inclusive_bounds_each_report_their_own_violation() throws Exception {
+        // 与 #50 的 const/enum 同一个道理: 两条是独立关键字, 各报各的. 断言按关键字分别数条数,
+        // 不数总条数 —— 否则"一支冒充另一支"会被读成通过.
+        // 取 " < minimum" 而不是 "minimum" 作针: 后者的字符串也出现在 "exclusiveMinimum" 里.
+        String both = "{\"minimum\":0,\"exclusiveMinimum\":0}";
+        List<String> onlyStrict = errorsOf(both, "0");
+        assertEquals("0 只该被 exclusiveMinimum 拒一次: " + onlyStrict, 1, onlyStrict.size());
+        assertEquals(1, countMatches(onlyStrict, "exclusiveMinimum"));
+        assertEquals(0, countMatches(onlyStrict, " < minimum"));
+        List<String> bothFire = errorsOf(both, "-1");
+        assertEquals("-1 该被两条各拒一次: " + bothFire, 2, bothFire.size());
+        assertEquals(1, countMatches(bothFire, " < minimum"));
+        assertEquals(1, countMatches(bothFire, "exclusiveMinimum"));
+        // 谁更严听各自的: minimum=5 时 5 过, 而 exclusiveMinimum=1 不参与把 5 拒掉
+        assertOk("{\"minimum\":5,\"exclusiveMinimum\":1}", "5");
+        assertOk("{\"maximum\":5,\"exclusiveMaximum\":9}", "5");
+        // 互相矛盾的两条上界: 参照 (ajv allErrors) 交两条 ("must be < 3 | must be > 5"), 我们也交两条
+        List<String> contradictory = errorsOf("{\"exclusiveMinimum\":5,\"exclusiveMaximum\":3}", "4");
+        assertEquals(2, contradictory.size());
+        assertEquals(1, countMatches(contradictory, "exclusiveMinimum"));
+        assertEquals(1, countMatches(contradictory, "exclusiveMaximum"));
+        // 非数值实例不参与 (两份参照同档: ajv/jsonschema 都判 VALID)
+        assertOk("{\"exclusiveMinimum\":0}", "\"abc\"");
+        assertOk("{\"exclusiveMinimum\":0}", "true");
+        assertOk("{\"exclusiveMinimum\":0}", "null");
+    }
+
+    @Test
+    public void multipleOf_asks_whether_it_divides_and_not_what_the_remainder_is() throws Exception {
+        assertOk("{\"multipleOf\":5}", "10");
+        assertOk("{\"multipleOf\":5}", "0");
+        assertOk("{\"multipleOf\":5}", "-10");
+        assertOk("{\"multipleOf\":-5}", "10");
+        assertOk("{\"multipleOf\":0.25}", "0.75");
+        assertFalse(errorsOf("{\"multipleOf\":5}", "11").isEmpty());
+        assertFalse(errorsOf("{\"multipleOf\":0.25}", "0.1").isEmpty());
+        // 浮点这三格是这一族的承重墙, 逐格抄自两份参照 (跨实现同方言判类相同):
+        //   {multipleOf:0.1} 遇 0.2 => 过;   遇 0.3 => **不过** (两家都判红)
+        // 所以参照做的不是"容忍浮点误差", 而是字面在问除得尽吗.
+        assertOk("{\"multipleOf\":0.1}", "0.2");
+        assertFalse("{multipleOf:0.1} 遇 0.3 被放过了", errorsOf("{\"multipleOf\":0.1}", "0.3").isEmpty());
+        // 这一格是"商"与"余数"两种写法的分岔点: 两份参照都判**过**, 而 Java 里
+        // 1.0 % 1e-8 = 9.99999997907744e-9 (非零) —— 写成余数形式会凭空多一条红.
+        assertOk("{\"multipleOf\":1e-8}", "1");
+        assertOk("{\"multipleOf\":1e21}", "1e22");
+        // 除数为 0: ajv 判违规, jsonschema 直接 RAISED ZeroDivisionError (同一档: 给不出"过")
+        assertFalse(errorsOf("{\"multipleOf\":0}", "5").isEmpty());
+        // 非数值实例不参与 (参照同档)
+        assertOk("{\"multipleOf\":5}", "\"10\"");
+        assertOk("{\"multipleOf\":5}", "true");
+    }
+
+    @Test
+    public void numeric_constraints_reach_tuple_positions_refs_and_combinators() throws Exception {
+        // 只在文档根上认数值 = 没认: pydantic 的约束住在 properties 里, 嵌套模型住在 $ref 背后.
+        String pos = "{\"type\":\"array\",\"items\":[{\"exclusiveMinimum\":0}]}";
+        List<String> atPos = errorsOf(pos, "[0]");
+        assertFalse("元组位置上的 exclusiveMinimum 没生效: " + atPos, atPos.isEmpty());
+        assertTrue("要报在下标上: " + atPos, atPos.get(0).startsWith("$[0]:"));
+        assertOk(pos, "[1]");
+        assertFalse("prefixItems 位置上的 exclusiveMinimum 没生效",
+                errorsOf("{\"type\":\"array\",\"prefixItems\":[{\"exclusiveMinimum\":0}]}", "[0]").isEmpty());
+        String tail = "{\"type\":\"array\",\"items\":[{\"multipleOf\":5}],\"additionalItems\":{\"multipleOf\":5}}";
+        assertOk(tail, "[10,15]");
+        List<String> tailWrong = errorsOf(tail, "[10,11]");
+        assertFalse("尾巴那份 schema 里的 multipleOf 没生效: " + tailWrong, tailWrong.isEmpty());
+        assertTrue("要报在尾巴那一格上: " + tailWrong, tailWrong.get(0).startsWith("$[1]:"));
+        List<String> viaRef = errorsOf("{\"$ref\":\"#/$defs/L\",\"$defs\":{\"L\":{\"exclusiveMinimum\":0}}}", "0");
+        assertFalse("$ref 目标里的 exclusiveMinimum 没生效: " + viaRef, viaRef.isEmpty());
+        String any = "{\"anyOf\":[{\"exclusiveMinimum\":0},{\"type\":\"integer\"}]}";
+        // 参照那格 (ajv allErrors) 交的是"另一支合上⇒整条过": 0 是 integer, 所以 anyOf 过.
+        assertOk(any, "0");
+        assertFalse("anyOf 两支都不合时没判红",
+                errorsOf("{\"anyOf\":[{\"exclusiveMinimum\":0},{\"exclusiveMaximum\":-5}]}", "0").isEmpty());
+        assertFalse("additionalProperties 里的 exclusiveMinimum 没生效",
+                errorsOf("{\"type\":\"object\",\"additionalProperties\":{\"exclusiveMinimum\":0}}",
+                        "{\"k\":0}").isEmpty());
+        // 具名属性上的路径 (properties 的键要出现在指针里, 否则运维拿到的红行没法定位)
+        List<String> named = errorsOf(
+                "{\"type\":\"object\",\"properties\":{\"floor_gt\":{\"exclusiveMinimum\":0}}}",
+                "{\"floor_gt\":0}");
+        assertFalse("properties 里的 exclusiveMinimum 没生效: " + named, named.isEmpty());
+        assertTrue("路径要点到键名: " + named, named.get(0).startsWith("$.floor_gt:"));
+        // 阳性对照: properties 点过名而实例里没这个键时, 子 schema 不参与求值 (参照两家同档)
+        assertOk("{\"type\":\"object\",\"properties\":{\"n\":{\"exclusiveMinimum\":0}}}", "{}");
+        assertEquals(1, countMatches(
+                errorsOf("{\"type\":\"object\",\"properties\":{\"n\":{\"exclusiveMinimum\":0}},"
+                        + "\"required\":[\"n\"]}", "{}"), "required"));
+    }
+
+    @Test
+    public void a_bound_that_is_not_a_number_does_not_participate() throws Exception {
+        // 这一支钉的是一个**有意的选择**, 不是一条漏掉的判据.
+        // draft-04 把严格下界写成 {"minimum":5,"exclusiveMinimum":true}; 现代客户端不交这个形状
+        // (pydantic 2.12.5 与 zod 4.6.5 都交数值写法), 而两份参照在这里自己分叉:
+        //   ajv 8.20.0 在 compile 阶段抛 "exclusiveMinimum value must be number" —— 那是**拒绝整份
+        //     schema**, 不是"这个实例违规", 与本方法返回的实例级清单不同类;
+        //   jsonschema 4.26.0 把它当一个非数值键忽略 ⇒ 5 与 6 都过.
+        // 我们站 jsonschema 那一侧, 并且与上面 minimum/maximum 用同一条 house rule (值不配当数值
+        // ⇒ 这条不参与). 反过来"照 ajv 办"要把 schema 级拒绝塞进实例级违规里, 那会让每一个合法
+        // 实例都变红 —— 那是比漏判更坏的方向.
+        assertOk("{\"minimum\":5,\"exclusiveMinimum\":true}", "5");
+        assertOk("{\"minimum\":5,\"exclusiveMinimum\":true}", "6");
+        List<String> stillInclusive = errorsOf("{\"minimum\":5,\"exclusiveMinimum\":true}", "4");
+        assertEquals(1, countMatches(stillInclusive, " < minimum"));
+        assertEquals(0, countMatches(stillInclusive, "exclusiveMinimum"));
+        assertOk("{\"exclusiveMinimum\":\"0\"}", "1");
+        assertOk("{\"multipleOf\":\"5\"}", "10");
+        // 上面两格的参照读数要抄准, 因为这里是"没有读数可用"而不是"参照与我们同见":
+        //   exMin string value   ⇒ ajv THREW `exclusiveMinimum value must be ["number"]`
+        //                          jsonschema RAISED TypeError: '<=' not supported between 'int' and 'str'
+        //   multipleOf string value ⇒ ajv THREW `multipleOf value must be ["number"]`
+        //                          jsonschema RAISED TypeError: unsupported operand type(s) for %: 'int' and 'str'
+        // 两家在这两格都**给不出实例级判决** (一份是 schema 级拒绝, 一份是运行时炸), 所以没有
+        // 可照抄的 VALID/INVALID ⇒ 只能沿用自己那条 house rule, 而不是"跟着参照走".
+        //
+        // 但"不参与"这件事本身要有牙: 光看上面那两格是量不出闸有没有被摘掉的, 因为把
+        // `isNumber()` 摘掉之后, 字符串经 `asDouble()` 会被读成 0.0 或它自己的数值, 而实例 1 / 10
+        // 在 `<= 0` / `1 % 1` 下**照样过** ⇒ 摘了闸也全绿 (与 #50 记过的"取样值恰好等于内置默认值"
+        // 同一形状). 所以再交三格**取值错开**的: 一旦那半条闸不在, 这里就会多出一条红.
+        assertOk("{\"exclusiveMinimum\":\"10\"}", "5");
+        assertOk("{\"exclusiveMaximum\":\"0\"}", "5");
+        assertOk("{\"multipleOf\":\"5\"}", "11");
+        // 但"不参与"只针对那一格错类型的值, 不是整条关掉的借口: 同一个对象里换成数值写法,
+        // 严格下界仍然要自己报一条.
+        List<String> numericForm = errorsOf("{\"minimum\":5,\"exclusiveMinimum\":5.5}", "5.2");
+        assertEquals(1, countMatches(numericForm, "exclusiveMinimum"));
+        assertEquals(0, countMatches(numericForm, " < minimum"));
+    }
 }
