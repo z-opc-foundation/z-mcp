@@ -237,10 +237,14 @@ public class JsonSchemaValidatorTest {
         assertTrue(errorsOf(ANY_OF_MIXED, "{\"m\":{\"v\":true}}").get(0).contains("$.m.v"));
         // required 住在 refs 背后一样要算
         assertFalse(errorsOf(ANY_OF_MIXED, "{\"m\":{}}").isEmpty());
-        // 同级关键字与 anyOf 各自独立生效 (anyOf 不是"二选一的逃生门")
+        // 同级关键字与 anyOf 各自独立生效 (anyOf 不是"二选一的逃生门").
+        // 这四格的期望值拿两份参照校验器对拍过: ~/.cache/zmcp_prey/ref48_sibling_oracle.log
+        // (jsonschema 4.25.1 与 ajv 8.20 四格读数逐条相同)
         assertOk("{\"anyOf\":[{\"type\":\"string\"}],\"minLength\":2}", "\"ab\"");
         assertFalse(errorsOf("{\"anyOf\":[{\"type\":\"string\"}],\"minLength\":2}", "\"a\"").isEmpty());
-        assertFalse(errorsOf("{\"anyOf\":[{\"type\":\"integer\"}],\"minLength\":2}", "5").isEmpty());
+        assertFalse(errorsOf("{\"anyOf\":[{\"type\":\"integer\"}],\"minimum\":10}", "5").isEmpty());
+        // minLength 对非字符串**不生效**, 这一格两份参照都判 VALID —— 记下来防手滑
+        assertOk("{\"anyOf\":[{\"type\":\"integer\"}],\"minLength\":2}", "5");
     }
 
     @Test
