@@ -609,6 +609,131 @@ public class McpProtocolHandlerTest {
         assertNull(r.get("structuredContent"));
     }
 
+    // --------------- #62: 其余六条出口(null/文本/字符/数字/布尔/单块/块列表/兜底)也并进同一个兑现口
+
+    /** "长得像对象但不在 Map/JsonNode 那一支"的返回值 —— 消费者最常交回的形状, 从前落到 String.valueOf. */
+    public static class CountBean {
+        @Override
+        public String toString() {
+            return "CountBean{count=7}";
+        }
+    }
+
+    private void registerShapeTool(String name, String outputSchema, final Object returned) {
+        McpRegistry.Builder b = registry.tool(name)
+                .description("returns a shape that is not a CallToolResult")
+                .inputSchema("{\"type\":\"object\",\"properties\":{}}");
+        if (outputSchema != null) b.outputSchema(outputSchema);
+        b.register(args -> returned);
+    }
+
+    /** 九种返回值形状, 覆盖 normalize() 除 CallToolResult 与 Map/JsonNode 之外的全部出口. */
+    private Object[][] bypassShapes() {
+        return new Object[][]{
+                {"null", null},
+                {"String", "plain text"},
+                {"Character", Character.valueOf('x')},
+                {"Number", Integer.valueOf(42)},
+                {"Boolean", Boolean.TRUE},
+                {"ContentBlock", ContentBlock.text("one block")},
+                {"List<ContentBlock>", java.util.Arrays.asList(ContentBlock.text("a"), ContentBlock.text("b"))},
+                {"POJO", new CountBean()},
+                {"List<String>", java.util.Arrays.asList("a", "b")},
+        };
+    }
+
+    @SuppressWarnings("unchecked")
+    private String firstBlockText(Map<String, Object> r) {
+        Object blocks = r.get("content");
+        if (!(blocks instanceof List) || ((List<Object>) blocks).isEmpty()) return "-";
+        Object first = ((List<Object>) blocks).get(0);
+        return first instanceof Map ? String.valueOf(((Map<String, Object>) first).get("text")) : String.valueOf(first);
+    }
+
+    @Test
+    public void every_bypassing_exit_now_honours_the_advertised_schema() throws Exception {
+        // 探针量过的现状(改之前, 九格逐个现量): 全部 isError=null、structuredContent 缺席, 广告形同虚设.
+        // 一张表一次断言(#56 的纪律): 漏了哪一条出口, 那一格自己点名.
+        List<String> wrong = new ArrayList<String>();
+        int i = 0;
+        for (Object[] shape : bypassShapes()) {
+            String name = "exit_" + (++i);
+            registerShapeTool(name, COUNT_SCHEMA, shape[1]);
+            Map<String, Object> r = toolsCall(name, "7" + i);
+            if (!Boolean.TRUE.equals(r.get("isError"))) {
+                wrong.add(shape[0] + " 仍然静默成功: " + r);
+            } else if (!firstBlockText(r).contains("declares an outputSchema but returned no structuredContent")) {
+                wrong.add(shape[0] + " 说的不是缺字段那句话: " + firstBlockText(r));
+            } else if (r.containsKey("structuredContent")) {
+                wrong.add(shape[0] + " 判红之后还把字节发出去了: " + r);
+            }
+        }
+        assertEquals("九条形状都该经同一个兑现口: " + wrong, 0, wrong.size());
+    }
+
+    @Test
+    public void the_same_shapes_stay_untouched_when_nothing_was_advertised() throws Exception {
+        // 兑现是广告换来的义务: 没广告就不许凭空长出约束(与上面那张表只差一句 outputSchema).
+        String[] expectedText = {"-", "plain text", "x", "42", "true", "one block", "a",
+                "CountBean{count=7}", "[a, b]"};
+        int[] expectedBlocks = {0, 1, 1, 1, 1, 1, 2, 1, 1};
+        List<String> wrong = new ArrayList<String>();
+        int i = 0;
+        for (Object[] shape : bypassShapes()) {
+            String name = "free_" + (++i);
+            registerShapeTool(name, null, shape[1]);
+            Map<String, Object> r = toolsCall(name, "8" + i);
+            Object blocks = r.get("content");
+            int n = blocks instanceof java.util.List ? ((java.util.List<?>) blocks).size() : -1;
+            if (r.get("isError") != null) {
+                wrong.add(shape[0] + " 没广告也被判红: " + r);
+            } else if (n != expectedBlocks[i - 1] || !expectedText[i - 1].equals(firstBlockText(r))) {
+                wrong.add(shape[0] + " 形状被改了: blocks=" + n + " 期望=" + expectedBlocks[i - 1]
+                        + " text=" + firstBlockText(r) + " 期望=" + expectedText[i - 1]);
+            }
+        }
+        assertEquals("未广告的出口一格都不该动: " + wrong, 0, wrong.size());
+
+        // 阳性对照: 同一格("String")一广告就该判红 —— 否则上面那句"一格都没动"没有牙.
+        registerShapeTool("free_prey", COUNT_SCHEMA, "plain text");
+        Map<String, Object> prey = toolsCall("free_prey", "90");
+        assertEquals(Boolean.TRUE, prey.get("isError"));
+        assertTrue("对照要说出缺的是哪一半: " + firstBlockText(prey),
+                firstBlockText(prey).contains("declares an outputSchema but returned no structuredContent"));
+    }
+
+    @Test
+    public void json_inside_a_text_block_is_never_reinterpreted_as_structured_content() throws Exception {
+        // 只认 structuredContent 这一半(两家参照同口径): 把合规 JSON 塞进文本块不算兑现.
+        registerShapeTool("smuggle", COUNT_SCHEMA,
+                java.util.Collections.singletonList(ContentBlock.text("{\"count\":7}")));
+        Map<String, Object> r = toolsCall("smuggle", "91");
+        assertEquals(Boolean.TRUE, r.get("isError"));
+        assertTrue("要说清缺的是 structuredContent: " + firstBlockText(r),
+                firstBlockText(r).contains("no structuredContent"));
+        // 同一份字节走 structuredContent 那一半就是合规的 —— 这句不是推的, 现取.
+        java.util.Map<String, Object> same = new java.util.LinkedHashMap<String, Object>();
+        same.put("count", Integer.valueOf(7));
+        registerShapeTool("legitimate", COUNT_SCHEMA, same);
+        Map<String, Object> ok = toolsCall("legitimate", "92");
+        assertNull("合规字节不许变红: " + ok, ok.get("isError"));
+        assertEquals(7, wireMap(ok.get("structuredContent")).get("count"));
+    }
+
+    @Test
+    public void an_unserializable_value_keeps_its_own_diagnosis() throws Exception {
+        // 折形状那一步的 catch 先产出 isError, 兑现那一步必须放行原话: 顺序反了会把病因盖成"缺字段".
+        java.util.Map<String, Object> boom = new java.util.LinkedHashMap<String, Object>();
+        boom.put("count", new Object());                       // Jackson 写不出没有可序列化属性的裸 Object
+        registerShapeTool("boom_shape", COUNT_SCHEMA, boom);
+        Map<String, Object> r = toolsCall("boom_shape", "93");
+        assertEquals(Boolean.TRUE, r.get("isError"));
+        String text = firstBlockText(r);
+        assertTrue("要保留序列化失败这句原话: " + text,
+                text.contains("returned a value that cannot be serialized"));
+        assertFalse("不许改判成缺 structuredContent: " + text, text.contains("no structuredContent"));
+    }
+
     // ------------------------------------------------------------- annotations
 
     @Test

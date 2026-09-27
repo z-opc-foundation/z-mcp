@@ -457,9 +457,33 @@ public class McpProtocolHandler {
         }
     }
 
-    /** 工具返回值 → 协议要求的类型化内容块数组. */
+    /**
+     * 工具返回值 → 协议要求的类型化内容块数组.
+     *
+     * <p>形状随返回值怎么变都行, 兑现广告的那一步只有一个出口: 折出来的结果一律过
+     * {@link #honorDeclaredOutputSchema}. #61 之前只有"工具体自己交回 CallToolResult"与
+     * Map/JsonNode 两支接了这台校验器, 剩下<b>六条</b>出口(null / 文本与字符 / 数字与布尔 /
+     * 单个内容块 / 内容块列表 / "不像对象"的兜底)都不经它。修法前的探针把这些形状逐个量过
+     * (九种绕过形状 + 两份 Map 对照 + 两份未广告对照): 广告了 schema 的九种形状一律
+     * {@code isError=null} 且 {@code structuredContent} 缺席, 而同一次运行里 Map 那一支的违例格
+     * 会说 "violating its outputSchema" —— 所以那九种的静默不是"没广告所以不兑", 是它们绕开了兑现口.
+     *
+     * <p>两家官方参照都没有"按返回形状分流"的通道: TS sdk 1.30.1
+     * {@code dist/esm/server/mcp.js:132} 对任何 handler 的产物只调一个
+     * {@code validateToolOutput()}, 它在缺 structuredContent 时抛
+     * "Tool ... has an output schema but no structured content was provided"
+     * ({@code :185-197}); python mcp 1.27.1 {@code server/lowlevel/server.py:543-563}
+     * 先按形状折成 structured/unstructured, 折完仍进同一道闸, 缺字段就
+     * "Output validation error: outputSchema defined but no structured output returned",
+     * 连 scalar 兜底那一支也是错误(同文件 {@code :557}).
+     */
     CallToolResult normalize(McpRegistry.ToolEntry entry, Object raw) {
-        if (raw instanceof CallToolResult) return honorDeclaredOutputSchema(entry, (CallToolResult) raw);
+        return honorDeclaredOutputSchema(entry, shapeToResult(entry, raw));
+    }
+
+    /** 只把返回值折成内容块与 structuredContent, 一条也不判定 —— 判定集中在 honor 那一处. */
+    private CallToolResult shapeToResult(McpRegistry.ToolEntry entry, Object raw) {
+        if (raw instanceof CallToolResult) return (CallToolResult) raw;
         if (raw == null) return CallToolResult.of(new ArrayList<ContentBlock>());
         if (raw instanceof CharSequence || raw instanceof Character) {
             return CallToolResult.text(raw.toString());
@@ -490,12 +514,6 @@ public class McpProtocolHandler {
             JsonNode node = raw instanceof JsonNode ? (JsonNode) raw : mapper.valueToTree(raw);
             String json = mapper.writeValueAsString(node);
             if (entry.outputSchemaJson != null && !entry.outputSchemaJson.trim().isEmpty()) {
-                JsonNode outSchema = parseSchema(entry.outputSchemaJson, entry.name, "outputSchema");
-                List<String> violations = validator.validate(outSchema, node);
-                if (!violations.isEmpty()) {
-                    return CallToolResult.executionError("tool " + entry.name
-                            + " produced output violating its outputSchema: " + join(violations, "; "));
-                }
                 CallToolResult structured = CallToolResult.structured(node, json);
                 structured.setStructuredContent(node);
                 return structured;
@@ -508,9 +526,10 @@ public class McpProtocolHandler {
     }
 
     /**
-     * 工具自己交回 {@link CallToolResult} 时, 广告过的 outputSchema 仍然要兑现.
+     * 广告过的 outputSchema 在这里兑现 —— {@link #normalize} 的每一条出口都只经这一处(#61 先接住
+     * "工具体自己交回 CallToolResult"那一支, #62 把其余六条出口也并进来).
      *
-     * <p>两家官方参照都在这一支校验并把违例折成 isError(不是 JSON-RPC error): python mcp 1.27.1
+     * <p>两家官方参照都把违例与缺字段折成 isError(不是 JSON-RPC error): python mcp 1.27.1
      * {@code fastmcp/utilities/func_metadata.py:115-118} 对 CallToolResult 走
      * {@code output_model.model_validate(result.structuredContent)}; TS sdk 1.30.1
      * {@code server/mcp.js} 的 {@code validateToolOutput()} 在缺 structuredContent 时抛
