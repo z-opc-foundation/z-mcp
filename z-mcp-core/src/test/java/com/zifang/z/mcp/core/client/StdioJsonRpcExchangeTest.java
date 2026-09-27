@@ -1,5 +1,6 @@
 package com.zifang.z.mcp.core.client;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zifang.z.mcp.api.dto.CallToolResult;
 import com.zifang.z.mcp.core.properties.McpProperties;
@@ -157,7 +158,8 @@ public class StdioJsonRpcExchangeTest {
     }
 
     /**
-     * 上游推一条我们做不了的请求(广告了 {@code roots} 能力, 协议上它就有权问).
+     * 上游推一条我们做不了的请求. 我们**没有**广告 {@code roots}(#46 把它摘了), 但这不是一条
+     * 可以拒收的帧 —— 协议没规定"没广告就不许问", 而且第三方 server 确实会照自己的一套问.
      *
      * <p>参照实现不是"没 handler 就闭嘴": TS SDK 的 {@code Protocol._onrequest} 对找不到
      * handler 的请求立刻回 {@code -32601 Method not found}. 差别是实打实的 —— 静默让对端
@@ -201,6 +203,45 @@ public class StdioJsonRpcExchangeTest {
             JsonRpcExchange.Response report = exchange.post(request(3, "report_spurious", null), null);
             assertTrue("孩子没向我们发过请求, 却收到了一句回答: " + report.body(),
                     report.body().contains("\"spurious\":null"));
+        } finally {
+            exchange.close();
+        }
+    }
+
+    /**
+     * 管道那头**实际看到**的承诺 —— 这一格量的是传输写出去的字节, 不是塞进 params 的 Map.
+     *
+     * <p>两层不是重复: {@code McpRemoteClientTest} 那条在"交给传输"之前就停了, 结构上看不见传输
+     * 究竟写出了什么。打过一支量这个差别: 在 stdio 的 {@code writeln} 里把
+     * {@code "capabilities":{},} 抹掉 ⇒ 只有这一层红, 另一层全绿。
+     * (顺带否掉我自己先前的一个假设: 把 MAPPER 换成 {@code NON_EMPTY} 并**不会**抹掉这个空对象,
+     * 帧里它照样在 —— 所以这一层的价值不在防某一种序列化配置, 而在"必填字段真在帧里"这句话
+     * 由管道那侧来作证。)
+     */
+    @Test
+    public void the_local_server_sees_an_empty_yet_present_capabilities_object() throws Exception {
+        StdioJsonRpcExchange exchange = open(6_000L);
+        try {
+            McpProperties.ServerConfig cfg = new McpProperties.ServerConfig();
+            cfg.setName("stdio-fixture");
+            McpRemoteClient client = new McpRemoteClient("stdio-fixture", cfg, exchange,
+                    MAPPER, "z-mcp", "0.2.0");
+            client.connect();
+
+            JsonNode seen = MAPPER.readTree(
+                    exchange.post(request(31, "report_initialize", null), null).body())
+                    .get("result").get("initialize");
+            assertTrue("孩子那侧没看见握手帧: " + seen, seen != null && seen.isObject());
+            JsonNode params = seen.get("params");
+            JsonNode caps = params.get("capabilities");
+            assertTrue("管道里的 initialize 缺了必填的 capabilities: " + seen,
+                    caps != null && caps.isObject());
+            assertEquals("这一侧兑现不了的承诺一件都不该出现在帧里: " + seen, 0, caps.size());
+            // 阳性对照: 同一份 params 里 clientInfo 的内层键读得见 ⇒ 上面那句"没有"是真没有,
+            // 不是这套判定看不见嵌套对象(那样它同样会看不见 roots/sampling/elicitation).
+            assertTrue("对照: 帧里的嵌套对象应当看得见内层键: " + params,
+                    params.get("clientInfo").isObject() && params.get("clientInfo").has("name"));
+            client.disconnect();
         } finally {
             exchange.close();
         }

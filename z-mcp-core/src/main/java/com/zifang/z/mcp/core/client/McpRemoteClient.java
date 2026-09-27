@@ -424,14 +424,20 @@ public class McpRemoteClient {
 
     private static final ObjectMapper WIRE_MAPPER = new ObjectMapper();
 
+    /**
+     * 握手时广告出去的客户端能力 —— 只列这一侧真兑现得了的.
+     *
+     * <p>这里一度写着 {@code roots}/{@code sampling}/{@code elicitation} 三件, 而全仓没有一处会答
+     * {@code roots/list} 或 {@code sampling/createMessage}: 广告就是给对端发"你可以问我"的邀请函,
+     * 问了答不上来只能回 -32601(#45 补的那道兜底). 两份官方参照都是**注册了回调才说** ——
+     * python 的 {@code ClientSession.initialize()} 逐件按 callback 是否仍是默认值来派生, TS 的
+     * {@code Client} 直接传 {@code options?.capabilities ?? {}}.
+     *
+     * <p>协议要求 {@code capabilities} 必填, 但没说不能是空对象 —— 所以这一格是"空", 不是"缺".
+     * 将来谁真实现了 roots 列表, 加在这里, 并同时加一条"上游问上门来答得出"的判据.
+     */
     private static Map<String, Object> clientCapabilities() {
-        Map<String, Object> caps = new LinkedHashMap<String, Object>();
-        Map<String, Object> roots = new LinkedHashMap<String, Object>();
-        roots.put("listChanged", Boolean.FALSE);
-        caps.put("roots", roots);
-        caps.put("sampling", new LinkedHashMap<String, Object>());
-        caps.put("elicitation", new LinkedHashMap<String, Object>());
-        return caps;
+        return new LinkedHashMap<String, Object>();
     }
 
     private static String text(JsonNode node, String field, String fallback) {

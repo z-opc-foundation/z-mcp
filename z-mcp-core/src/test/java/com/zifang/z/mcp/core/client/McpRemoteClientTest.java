@@ -134,6 +134,30 @@ public class McpRemoteClientTest {
         assertTrue("capabilities 必填且必须是对象", init.get("params").get("capabilities").isObject());
     }
 
+    /**
+     * 广告出去的每一件事都是一份承诺: 上游看见 {@code roots} 就会问 {@code roots/list},
+     * 看见 {@code sampling} 就会派一次采样 —— 而这一侧一件都没实现, 问了只能回 -32601
+     * (#45 才补上那条兜底). 两份官方参照都是"注册了回调才说".
+     */
+    @Test
+    public void the_handshake_advertises_only_what_the_client_can_actually_answer() throws Exception {
+        Script script = new Script().handshake("sess-caps");
+        client(script, config()).connect();
+
+        JsonNode params = script.bodyOf(0).get("params");
+        JsonNode caps = params.get("capabilities");
+        assertTrue("capabilities 必填(可以是空对象, 但不能缺): " + script.bodies.get(0),
+                caps != null && caps.isObject());
+        for (String unimplemented : new String[] {"roots", "sampling", "elicitation"}) {
+            assertFalse("广告了 " + unimplemented + " 就得答得出它: " + script.bodies.get(0),
+                    caps.has(unimplemented));
+        }
+        // 阳性对照: clientInfo 是同一处、同一种嵌套 Map 塞进 params 的, 它的内层键读得见
+        // 才说明上面那三条"看不见 roots"是真没有, 而不是这套判定本身是瞎的.
+        assertTrue("对照: params 里的嵌套对象应当看得见内层键",
+                params.get("clientInfo").isObject() && params.get("clientInfo").has("name"));
+    }
+
     @Test
     public void connect_always_follows_initialize_with_the_initialized_notification() throws Exception {
         Script script = new Script().handshake("s1");

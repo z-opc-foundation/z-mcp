@@ -24,6 +24,9 @@ public final class StdioMcpServerFixture {
     /** 客户端回了一条"不是请求所能换来的东西"的帧 —— 只在 method 缺席时记账. */
     private static String spurious;
 
+    /** 握手那一帧的原样字节 —— 管道那头到底收到了什么承诺, 由它作证. */
+    private static String initializeFrame;
+
     public static void main(String[] argv) throws Exception {
         BufferedReader in = new BufferedReader(
                 new InputStreamReader(System.in, "UTF-8"));
@@ -41,6 +44,7 @@ public final class StdioMcpServerFixture {
             }
             if (id == null) continue;
             if ("initialize".equals(method)) {
+                initializeFrame = line;
                 out.println("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\","
                         + "\"params\":{\"level\":\"info\",\"data\":\"fixture booting\"}}");
                 out.flush();
@@ -85,6 +89,9 @@ public final class StdioMcpServerFixture {
                         + (answer == null ? "null" : answer) + "}");
             } else if ("report_spurious".equals(method)) {
                 reply(out, id, "{\"spurious\":" + (spurious == null ? "null" : spurious) + "}");
+            } else if ("report_initialize".equals(method)) {
+                reply(out, id, "{\"initialize\":"
+                        + (initializeFrame == null ? "null" : initializeFrame) + "}");
             } else if ("never_answers".equals(method)) {
                 // 什么都不做: 让客户端自己超时
             } else if ("blind_stdout".equals(method)) {

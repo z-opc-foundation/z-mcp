@@ -31,9 +31,9 @@ import java.util.concurrent.TimeUnit;
  * <p>读侧用独立线程**按 id 派发**, 而不是"顺序读到 id 匹配的那行为止": 上游会在两次响应
  * 之间插通知(notifications/*), 顺序读会把请求错配或直接读死.
  *
- * <p>读侧还有一条反过来的责任: 上游也可以向我们**发请求**(ping、或我们广告了 roots 之后
- * 的 roots/list), 而在这条链路上我们是 client —— 不该答的要闭嘴, 该答的一句都不能拖,
- * 见 {@link #answerIfRequest}.
+ * <p>读侧还有一条反过来的责任: 上游也可以向我们**发请求**(ping, 或任何它以为我们支持的方法 ——
+ * 握手已不再广告 client 侧做不到的能力(#46), 但协议不允许我们假定对端因此就不问),
+ * 而在这条链路上我们是 client —— 不该答的要闭嘴, 该答的一句都不能拖, 见 {@link #answerIfRequest}.
  */
 public final class StdioJsonRpcExchange implements JsonRpcExchange, Closeable {
 
@@ -228,7 +228,8 @@ public final class StdioJsonRpcExchange implements JsonRpcExchange, Closeable {
      *
      * <ul>
      *   <li>{@code ping} —— 协议规定被 ping 的一方 MUST 回一个空 result.</li>
-     *   <li>其余方法(例如我们广告了 {@code roots} 能力, 上游就有权问 {@code roots/list}) ——
+     *   <li>其余方法(例如已不再广告的 {@code roots} —— 上游问什么不由我们的 capabilities 决定,
+     *       它随时有权问) ——
      *       回 {@code -32601 Method not found}, 与参照实现 {@code Protocol._onrequest} 的做法一致:
      *       对端当场就能继续干活, 而且知道是哪条路走不通, 而不是白等一整个它的超时.</li>
      *   <li>没有 id 的帧是通知, 无从应答, 也不该编一个 id 出来.</li>
