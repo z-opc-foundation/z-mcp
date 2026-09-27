@@ -36,10 +36,17 @@ import java.util.regex.PatternSyntaxException;
  * 表达成 {"propertyNames":{"type":"string","pattern":"^k_"},"additionalProperties":{值 schema}}
  * (读数: ref53_py_wire.log / ref53b_py_wire.log / tsclient/ref53_zod_wire.log).
  * 四份参照 × 双方言 71 格同名 (ref53_object_oracle.py 与 tsclient/ref53_object_oracle.js),
- * 逐格对拍由 ref53_crossdiff.py 现算: 66 格四家同判, 分叉只有 5 格 —— 3 格是**正则方言**
- * (ECMA-262 与 Python re / java.util.regex 在 `a$` 吃不吃结尾换行、`\z`、`(?i)` 三点上不同),
- * 1 格是子 schema 位置长了字符串 (ajv 静默忽略、jsonschema 内部崩, 没有可照抄的判决),
- * 1 格是 draft-07 的 $ref 优先级. 立场逐条写在 checkObject 的注释与 ref53_crossdiff.py 头部.
+ * 逐格对拍由 ref53_crossdiff.py 现算, 三桶账由 cmp53.py 现算, 别混着引:
+ *   61 格四家**都给得出判决且同判** —— 这一族才有"照抄"可言, 我们逐格对上 61/61;
+ *    5 格四家**分叉** —— 3 格是正则方言 (ECMA-262 与 Python re / java.util.regex 在 `a$`
+ *    吃不吃结尾换行、`\z`、`(?i)` 三点上不同), 1 格是子 schema 位置长了字符串 (ajv 静默忽略、
+ *    jsonschema 内部崩), 1 格是 draft-07 的 $ref 优先级;
+ *    5 格四家**都给不出判决** (ajv 编译期抛 `... value must be ["object","boolean"]` /
+ *    jsonschema RAISED AttributeError、TypeError) —— 其中 3 格我们给一条点名路径的判定
+ *    (patternProperties 整条不配当对象、模式串本身编译不过、propertyNames 不配当 schema),
+ *    2 格按 #51 那条 isNumber 政策让整条不参与 (min/maxProperties 的值是字符串).
+ * 粗口径把最后这 5 格也算"同判" (两边都不是 VALID) 于是得到 66 —— 引用 66 之前先想清楚它不等于
+ * "66 格都有可照抄的判决". 立场逐条写在 checkObject 的注释与 ref53_crossdiff.py 头部.
  *
  * <p>数组的"元素互异"这一族原本是整条躺在"未知关键字不作约束"里: 广告「tags 只能是互异的
  * 一组值」的参数, 传 ["a","a"] 照过. 这一族同样是真生产者交上来的形状 —— python SDK 1.27.1 +
