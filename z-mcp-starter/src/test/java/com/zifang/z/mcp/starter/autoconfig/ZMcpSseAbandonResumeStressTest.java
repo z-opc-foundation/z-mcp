@@ -55,9 +55,12 @@ import static org.junit.Assert.assertTrue;
  * 1/5 轮切开、run {@code 36246808027} jdk8 1/5 且 jdk17 2/5(两次都在"补发那一帧"上)。
  * #57(一帧只交一片)上树后再两跑: run {@code 36336223201} 两格都 0/5, 而紧接着的 run
  * {@code 36336993342}(与前一跑**同一枚行为字节**, 只差那份 README)jdk8 0/5 但 jdk17 1/5 ——
- * 所以"帧内没有缝"消掉的是能留下半个事件的那两道缝, 不是"被切开"这件事本身。留档的 CI 日志({@code
- * ~/.cache/zmcp_prey/ci*})里这一行共打印 55 次: {@code torn} 分布 0×39 / 1×10 / 2×4 / 3×1 / 4×1,
- * 而 55 次的 {@code lost} **全是 0** —— 这才是这台尺钉着的那一半。
+ * 所以"帧内没有缝"消掉的是能留下半个事件的那两道缝, 不是"被切开"这件事本身。留档 CI 的累计读数(计数
+ * **只认 {@code job_*.log}**: 每个 job 日志恰好打印一行, 把 poll.log 里那些 TEAR 转述一起数会重复计票
+ * —— 这一格第一版就犯过这个错, 印出过 55 这个虚数):
+ * {@code find ~/.cache/zmcp_prey/ci* -name 'job_*.log' -type f -print0 | xargs -0 grep -ho "弃流→立刻续传: rounds=[0-9]* torn=[0-9]* lost=[0-9]*" | sort | uniq -c}
+ * ⇒ 49 个 job 格, {@code torn} 分布 0×36 / 1×7 / 2×4 / 3×1 / 4×1(13 格切过), 而 49 次的 {@code lost}
+ * **全是 0** —— 这才是这台尺钉着的那一半。每跑一遍 CI 这组分母 +2, 所以它是"截至本格"的快照不是常量。
  * 本机把形状拉满 {@code -Dz.mcp.sse.abandon.resume.rounds=2000}(约 5 ms/轮, 10.3 秒跑完)
  * ⇒ **0 次切开**。两条顺势被证伪的猜测: ① "裸 {@code HttpURLConnection} 把弃掉的那条 socket
  * 交给了下一次请求" —— 一支只读探针在 8 与 17 上各 20 轮, 服务端数到的连接数与请求数都是
