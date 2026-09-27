@@ -1,6 +1,7 @@
 package com.zifang.z.mcp.core.validation;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
@@ -17,10 +18,28 @@ import java.util.regex.PatternSyntaxException;
  *
  * <p>覆盖 MCP 工具 schema 实际会用到的关键字: type / required / properties /
  * items (单份 schema、布尔、**数组形式**三种) / prefixItems / additionalItems /
- * enum / const / additionalProperties / minimum / maximum / exclusiveMinimum /
+ * enum / const / additionalProperties / patternProperties / propertyNames /
+ * minimum / maximum / exclusiveMinimum /
  * exclusiveMaximum / multipleOf / uniqueItems / minLength / maxLength /
- * pattern / minItems / maxItems / nullable, 外加 refs 与组合子: $ref / $defs /
+ * pattern / minItems / maxItems / minProperties / maxProperties / nullable,
+ * 外加 refs 与组合子: $ref / $defs /
  * definitions / allOf / anyOf / oneOf / not.
+ *
+ * <p>对象侧原本只有 required / properties / additionalProperties / minProperties 四条, 而
+ * "additionalProperties 的适用范围"这一条写漏了一半: 规范里 "additional" 指的是既不在 properties
+ * 里、也没被 patternProperties 盖住的键, 只查 properties 的话, 一份
+ * {"patternProperties":{"^k_":...},"additionalProperties":false} 的 schema 会把**每一个**合法键
+ * 判成 "unknown property" —— 那是把合法调用拒掉, 比"约束没生效"更糟. 这一族的形状两侧生产者都
+ * 交得出来, 但是两条不同的路: pydantic 2.12.5 走 patternProperties (Dict[Annotated[str,
+ * StringConstraints(pattern='^k_')], int]) 与 propertyNames (Dict[Literal[...], int] /
+ * Dict[枚举, int] / Dict[date, int]), zod 4.6.5 **压根不交 patternProperties** 而是把约束键 record
+ * 表达成 {"propertyNames":{"type":"string","pattern":"^k_"},"additionalProperties":{值 schema}}
+ * (读数: ref53_py_wire.log / ref53b_py_wire.log / tsclient/ref53_zod_wire.log).
+ * 四份参照 × 双方言 71 格同名 (ref53_object_oracle.py 与 tsclient/ref53_object_oracle.js),
+ * 逐格对拍由 ref53_crossdiff.py 现算: 66 格四家同判, 分叉只有 5 格 —— 3 格是**正则方言**
+ * (ECMA-262 与 Python re / java.util.regex 在 `a$` 吃不吃结尾换行、`\z`、`(?i)` 三点上不同),
+ * 1 格是子 schema 位置长了字符串 (ajv 静默忽略、jsonschema 内部崩, 没有可照抄的判决),
+ * 1 格是 draft-07 的 $ref 优先级. 立场逐条写在 checkObject 的注释与 ref53_crossdiff.py 头部.
  *
  * <p>数组的"元素互异"这一族原本是整条躺在"未知关键字不作约束"里: 广告「tags 只能是互异的
  * 一组值」的参数, 传 ["a","a"] 照过. 这一族同样是真生产者交上来的形状 —— python SDK 1.27.1 +
@@ -333,12 +352,48 @@ public class JsonSchemaValidator {
                 if (node.has(key)) walk(props.get(key), node.get(key), path + "." + key, ctx, errors);
             }
         }
+        // 被任一 pattern 盖住的键. 它有两个用处: patternProperties 自己的判定, 以及**下一支**
+        // additionalProperties 那两条的适用范围 —— 规范里 "additional" 指的是既不在 properties 里、
+        // 也没被 patternProperties 盖住的那些键, 漏掉后半句就会把合法调用判成非法 (见下面的注释).
+        Set<String> patternCovered = new LinkedHashSet<String>();
+        JsonNode patterns = schema.get("patternProperties");
+        if (patterns != null && !patterns.isNull()) {
+            // 显式 null 当作没写, 与上面 items / 下面 additionalItems 那几支同一口径 (那儿的
+            // "关键字配了不配当值的类型"一格四份参照互不一致, 所以走政策而不是照抄某一家).
+            if (!patterns.isObject()) {
+                errors.add(path + ": patternProperties must be an object of schemas but is "
+                        + jsonType(patterns) + " " + literal(patterns) + ", refusing to guess");
+            } else {
+                Iterator<String> pit = patterns.fieldNames();
+                while (pit.hasNext()) {
+                    String regex = pit.next();
+                    Pattern compiled;
+                    try {
+                        compiled = Pattern.compile(regex);
+                    } catch (PatternSyntaxException e) {
+                        errors.add(path + ": malformed pattern in schema: " + e.getMessage());
+                        continue;
+                    }
+                    // find() 而不是 matches(): patternProperties 的 pattern 是**不锚定**的, 与 checkString
+                    // 里那支 pattern 同一个口径. 四份参照同判 (ref53 两份日志的 unanchored pattern
+                    // substring key: 键 "xk_a" 落在 /k_/ 里 ⇒ 该键受约束 ⇒ RED).
+                    Iterator<String> kit = node.fieldNames();
+                    while (kit.hasNext()) {
+                        String key = kit.next();
+                        if (compiled.matcher(key).find()) {
+                            patternCovered.add(key);
+                            walk(patterns.get(regex), node.get(key), path + "." + key, ctx, errors);
+                        }
+                    }
+                }
+            }
+        }
         JsonNode additional = schema.get("additionalProperties");
         if (additional != null && additional.isBoolean() && !additional.asBoolean()) {
             Iterator<String> it = node.fieldNames();
             while (it.hasNext()) {
                 String key = it.next();
-                if (props == null || !props.has(key)) {
+                if ((props == null || !props.has(key)) && !patternCovered.contains(key)) {
                     errors.add(path + ": unknown property '" + key + "' not allowed");
                 }
             }
@@ -349,14 +404,43 @@ public class JsonSchemaValidator {
             Iterator<String> it = node.fieldNames();
             while (it.hasNext()) {
                 String key = it.next();
-                if (props == null || !props.has(key)) {
+                if ((props == null || !props.has(key)) && !patternCovered.contains(key)) {
                     walk(additional, node.get(key), path + "." + key, ctx, errors);
                 }
             }
         }
+        JsonNode names = schema.get("propertyNames");
+        if (names != null && !names.isNull()) {
+            // 键本身当字符串实例再过一遍这份子 schema. 这一族**两侧生产者都交得出来**, 而且是两条
+            // 不同的路: python 那侧 pydantic 2.12.5 的 Dict[Literal['a','b'], int] 交
+            // {"propertyNames":{"enum":["a","b"]}}, Dict[Color,int] 交 {"propertyNames":{"$ref":...}}
+            // (枚举被抽进 $defs ⇒ 键约束里可以嵌指针), Dict[date,int] / Dict[UUID4,int] 交
+            // {"propertyNames":{"format":...}} (ref53b_py_wire.py 现跑: propertyNames=4);
+            // TS 那侧 zod 4.6.5 **压根不交 patternProperties** (ref53_zod_wire.log:
+            // ON_WIRE patternProperties=0 / propertyNames=5), 它把约束键 record 表达成
+            // {"propertyNames":{"type":"string","pattern":"^k_"},"additionalProperties":{值 schema}}
+            // ⇒ 这一族里 propertyNames 是唯一两侧都上得了线的关键字.
+            Iterator<String> it = node.fieldNames();
+            while (it.hasNext()) {
+                String key = it.next();
+                walk(names, TextNode.valueOf(key), path + "." + key, ctx, errors);
+            }
+        }
         JsonNode minProps = schema.get("minProperties");
-        if (minProps != null && minProps.isInt() && node.size() < minProps.asInt()) {
-            errors.add(path + ": expected at least " + minProps.asInt() + " properties");
+        // 值不配当数字时不参与 (与 #51 在 strict*Bound 上定的政策同一条): 这一格四份参照都是
+        // "没法给判决" —— ajv 与 jsonschema 都在 compile/check_schema 阶段拒掉整份 schema
+        // (ref53 两份日志的 maxProperties string value 那行). 不比 #52 那三格更糟, 也不照抄.
+        //
+        // 但**是数字就得参与**, 包括非整数: 上一版这里是 isInt(), 于是 {"minProperties":1.5} 遇
+        // {"a":1} 被判成"不参与"⇒ 绿, 而四份参照在这格上同判红 (minProperties float value:
+        // ajv 与 jsonschema 都按 1 < 1.5 算). 这一族的参照用的是数值比较而不是整数比较, 所以闸放成
+        // isNumber() + 比 double. 旁边的 minItems / maxLength 那一族本轮没量过, 不跟着改.
+        if (minProps != null && minProps.isNumber() && node.size() < minProps.asDouble()) {
+            errors.add(path + ": expected at least " + literal(minProps) + " properties");
+        }
+        JsonNode maxProps = schema.get("maxProperties");
+        if (maxProps != null && maxProps.isNumber() && node.size() > maxProps.asDouble()) {
+            errors.add(path + ": expected at most " + literal(maxProps) + " properties");
         }
     }
 

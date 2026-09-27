@@ -1073,4 +1073,274 @@ public class JsonSchemaValidatorTest {
         assertOk("{\"uniqueItems\":true}", "\"aa\"");
         assertOk("{\"uniqueItems\":true}", "null");
     }
+
+    @Test
+    public void patternProperties_on_a_key_actually_constrains_the_value() throws Exception {
+        // 这一族原本整条躺在"未知关键字不作约束"里: 广告「bag 里凡是 k_ 开头的键都得是整数」的参数,
+        // 传 {"k_a":"s"} 照过. 交这个形状的生产者是量出来的而不是设想的:
+        // ref53_py_wire.log 的 Dict[Annotated[str, StringConstraints(pattern='^k_')], int] 交
+        // {"patternProperties":{"^k_":{"type":"integer"}}}, 第二批 (ref53b_py_wire.log) 里
+        // ConfigDict(extra='forbid') 的模型把同一份结构嵌进 $defs.PatternBag.properties.bag.
+        // TS 那侧是另一条路: zod 4.6.5 压根不交这一族 (ref53_zod_wire.log ON_WIRE patternProperties=0),
+        // 它把同一意图写成 propertyNames ⇒ 见下面第三支, 那一族才是两侧都上得了线的.
+        String s = "{\"patternProperties\":{\"^k_\":{\"type\":\"integer\"}}}";
+        assertOk(s, "{\"k_a\":1}");
+        // 没被任何模式盖住的键不受这条约束 (unmatched key unconstrained, 四份同判 VALID)
+        assertOk(s, "{\"other\":\"s\"}");
+        assertEquals(1, countMatches(errorsOf(s, "{\"k_a\":\"s\"}"), "expected type integer"));
+        // 空对象与非对象实例上这条不参与 —— 与 #52 在 uniqueItems 上同一口径, 四格四份同判 VALID
+        assertOk(s, "{}");
+        assertOk(s, "[1,1]");
+        assertOk(s, "\"k_a\"");
+        assertOk(s, "null");
+        // 子 schema 那三种值: true 不约束 / false 谁都别想进来 / 没盖住的键不受 false 影响
+        assertOk("{\"patternProperties\":{\"^k_\":true}}", "{\"k_a\":1}");
+        assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"^k_\":false}}", "{\"k_a\":1}"),
+                "rejected by an always-false schema"));
+        assertOk("{\"patternProperties\":{\"^k_\":false}}", "{\"other\":1}");
+        assertOk("{\"patternProperties\":{}}", "{\"a\":1}");
+        // 模式是**不锚定**的: 规范说的是"匹配上即适用", 不是"整串等于键名". 下面两格只差一处锚,
+        // 合起来钉的是 matches() 还是 find() —— 用 matches() 时第二格会静默变绿, 而四份参照都判红
+        // (unanchored pattern substring key: ajv `/xk_a must be integer` /
+        //  jsonschema `'s' is not of type 'integer'`).
+        assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"k_\":{\"type\":\"integer\"}}}",
+                "{\"xk_a\":\"s\"}"), "expected type integer"));
+        assertOk("{\"patternProperties\":{\"^a$\":{\"type\":\"integer\"}}}", "{\"a\":1,\"ab\":\"s\"}");
+        // '' 这个模式盖住**所有**键; 而 ^[0-9]{3}$ 这种点名的锚定形状照常工作.
+        assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"\":{\"type\":\"integer\"}}}",
+                "{\"a\":1,\"b\":\"s\"}"), "expected type integer"));
+        assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"^[0-9]{3}$\":{\"type\":\"integer\"}}}",
+                "{\"123\":\"s\"}"), "expected type integer"));
+        // 键名可以是非 ASCII (真客户端的键就是字符串, 不保证 ASCII): unicode key 四份同判红
+        assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"^中\":{\"type\":\"integer\"}}}",
+                "{\"中文\":\"s\"}"), "expected type integer"));
+    }
+
+    @Test
+    public void a_key_covered_by_a_pattern_is_not_additional() throws Exception {
+        // 这一支是本轮里最贵的一条: 它不是"少约束", 而是**把合法调用判成非法**.
+        // 规范里 "additional" = 既不在 properties 里、也没被 patternProperties 盖住的键, 而上一版
+        // 只查了前半个条件 ⇒ {"patternProperties":{"^k_":...},"additionalProperties":false} 配
+        // {"k_a":1} 这种**四份参照同判 VALID** 的调用, 我们判的是 "unknown property 'k_a' not allowed".
+        // 这不是假想组合: ref53b_py_wire.log 里 $defs.PatternBag 就是同一份文档里 extra='forbid'
+        // 与内层 patternProperties 一起上线的形状, 所以修之前任何走这条路的产品调用都会被拒.
+        String s = "{\"patternProperties\":{\"^k_\":{\"type\":\"integer\"}},\"additionalProperties\":false}";
+        assertOk(s, "{\"k_a\":1}");
+        List<String> unmatched = errorsOf(s, "{\"k_a\":1,\"other\":2}");
+        assertEquals(1, countMatches(unmatched, "unknown property 'other' not allowed"));
+        assertEquals(0, countMatches(unmatched, "unknown property 'k_a'"));
+        // additionalProperties 是份 schema 时同理: 被盖住的键**不**再过它一遍. 两格互相反着钉:
+        // 第一格若错误地双查, 1 会因不是 string 而红 (四份都判 VALID);
+        // 第二格若漏了 pattern 那一支, "s" 是合法 string ⇒ 静默绿 (四份都判红, 且 jsonschema
+        // 只报一条 `'s' is not of type 'integer'` ⇒ 不重复报).
+        String apSchema = "{\"patternProperties\":{\"^k_\":{\"type\":\"integer\"}},"
+                + "\"additionalProperties\":{\"type\":\"string\"}}";
+        assertOk(apSchema, "{\"k_a\":1}");
+        List<String> conflict = errorsOf(apSchema, "{\"k_a\":\"s\"}");
+        assertEquals(1, countMatches(conflict, "expected type integer"));
+        assertEquals(0, countMatches(conflict, "expected type string"));
+        // properties 与 patternProperties 对同一个键各自适用, 谁也不顶掉谁 (规范明文).
+        // 两格互为反向 —— 换实例方向才分得开"两条都在跑"和"只有一条在跑":
+        // {"k_a":1} 违 properties(string) 而满足 pattern(integer), {"k_a":"s"} 反过来.
+        String both = "{\"properties\":{\"k_a\":{\"type\":\"string\"}},"
+                + "\"patternProperties\":{\"^k_\":{\"type\":\"integer\"}}}";
+        assertEquals(1, countMatches(errorsOf(both, "{\"k_a\":1}"), "expected type string"));
+        assertEquals(0, countMatches(errorsOf(both, "{\"k_a\":1}"), "expected type integer"));
+        assertEquals(1, countMatches(errorsOf(both, "{\"k_a\":\"s\"}"), "expected type integer"));
+        assertEquals(0, countMatches(errorsOf(both, "{\"k_a\":\"s\"}"), "expected type string"));
+        // 多个模式同时命中一个键 ⇒ 每个模式的判定都算 (two patterns both match 四份同判红;
+        // two patterns agree 四份同判绿)
+        assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"^k_\":{\"type\":\"integer\"},"
+                + "\"_a$\":{\"type\":\"string\"}}}", "{\"k_a\":1}"), "expected type string"));
+        assertOk("{\"patternProperties\":{\"^k_\":{\"type\":\"integer\"},"
+                + "\"k_1$\":{\"type\":\"integer\"}}}", "{\"k_1\":1}");
+        // required 与它各报各的 (with required both report: 两家都是两条并列)
+        List<String> withReq = errorsOf("{\"required\":[\"a\"],\"patternProperties\":"
+                + "{\"^k_\":{\"type\":\"integer\"}}}", "{\"k_a\":\"s\"}");
+        assertEquals(1, countMatches(withReq, "missing required property 'a'"));
+        assertEquals(1, countMatches(withReq, "expected type integer"));
+    }
+
+    @Test
+    public void propertyNames_checks_the_key_itself_not_the_value() throws Exception {
+        // 键本身也要过一份 schema. 这一族是本轮唯一**两侧生产者都上得了线**的关键字:
+        //   ref53b_py_wire.py 现跑 propertyNames=4: Dict[Literal['a','b'],int] 交
+        //     {"propertyNames":{"enum":["a","b"]}}, Dict[Color,int] 交
+        //     {"propertyNames":{"$ref":"#/$defs/Color"}} (枚举被抽进 $defs ⇒ 键约束里可以嵌指针),
+        //     Dict[date,int] / Dict[UUID4,int] 交 {"propertyNames":{"format":...}};
+        //   ref53_zod_wire.log 现跑 propertyNames=5 而同批 patternProperties=0 —— zod 把"键得长成
+        //     这样"写成 {"propertyNames":{"type":"string","pattern":"^k_"},"additionalProperties":{值}}.
+        // 下面第一格就是那批字节抄来的, 不是我为测试编的形状.
+        String zodRecord = "{\"type\":\"object\",\"propertyNames\":{\"type\":\"string\","
+                + "\"pattern\":\"^k_\"},\"additionalProperties\":{\"type\":\"number\"}}";
+        assertOk(zodRecord, "{\"k_a\":1}");
+        assertEquals(1, countMatches(errorsOf(zodRecord, "{\"bad\":1}"), "does not match pattern"));
+        assertOk(zodRecord, "{}");
+        // 非对象实例上这条不参与. 用的是格表里那一格的**原形状** (propertyNames ignores array
+        // instance = {"propertyNames":{"maxLength":3}} 配 ["abcd"]), 不加 type:object —— 上面那份
+        // zod 字节里带 type, 拿它配数组实例红的是 type 不是这一条, 那是把两条判据混成一条读.
+        assertOk("{\"propertyNames\":{\"maxLength\":3}}", "[\"abcd\"]");
+        // 子 schema 的四种形状各钉一次, 每一格都是 ref53 两份日志里的同名格
+        assertEquals(1, countMatches(errorsOf("{\"propertyNames\":{\"maxLength\":3}}", "{\"abcd\":1}"),
+                "string longer than maxLength 3"));
+        assertOk("{\"propertyNames\":{\"maxLength\":3}}", "{\"abc\":1}");
+        assertOk("{\"propertyNames\":{\"enum\":[\"a\",\"b\"]}}", "{\"a\":1}");
+        assertEquals(1, countMatches(errorsOf("{\"propertyNames\":{\"enum\":[\"a\",\"b\"]}}", "{\"c\":1}"),
+                "not in enum"));
+        assertEquals(1, countMatches(errorsOf("{\"propertyNames\":false}", "{\"a\":1}"),
+                "rejected by an always-false schema"));
+        assertOk("{\"propertyNames\":false}", "{}");   // 没有键就没有判定, 这条不是"恒红"
+        // format 在这一族里是**注记不是断言**: {"propertyNames":{"format":"date"}} 配
+        // {"not-a-date":1} 四份参照全部 VALID (ajv 只警告不判红). 这一格同时就是"format 整条为什么
+        // 不实现"的读数 —— 那条边界不是漏掉的测试.
+        assertOk("{\"propertyNames\":{\"format\":\"date\"}}", "{\"not-a-date\":1}");
+        // 指针落进 $defs 里的枚举 (pydantic 那条真实路线)
+        String colorKeys = "{\"$defs\":{\"Color\":{\"enum\":[\"red\",\"blue\"],\"type\":\"string\"}},"
+                + "\"propertyNames\":{\"$ref\":\"#/$defs/Color\"}}";
+        assertOk(colorKeys, "{\"red\":1}");
+        assertEquals(1, countMatches(errorsOf(colorKeys, "{\"green\":1}"), "not in enum"));
+        // 键名判定与键值判定互相独立、各报各的 (with additionalProperties schema:
+        // jsonschema 两方言对这一格都恰好两条 'toolong' is too long + is not of type 'integer')
+        List<String> two = errorsOf("{\"propertyNames\":{\"maxLength\":3},"
+                + "\"additionalProperties\":{\"type\":\"integer\"}}", "{\"toolong\":\"s\"}");
+        assertEquals(1, countMatches(two, "string longer than maxLength 3"));
+        assertEquals(1, countMatches(two, "expected type integer"));
+    }
+
+    @Test
+    public void key_count_bounds_are_two_sided() throws Exception {
+        // maxProperties 整条躺在"未知关键字不作约束"里 ⇒ 广告「最多 3 项」的 map 传 4 项照过;
+        // minProperties 那一支其实**早就在代码里**(5037b84 起), 但全仓一条测试都没钉过它,
+        // 所以它到底在不在做事, 之前只能靠读代码的人相信. 交这一族的形状: ref53_py_wire.log 的
+        // Dict[str,int] + Field(max_length=3) / Field(min_length=1) 交出的就是下面那份字节.
+        String producer = "{\"type\":\"object\",\"additionalProperties\":{\"type\":\"integer\"},"
+                + "\"maxProperties\":3,\"minProperties\":1}";
+        assertOk(producer, "{\"a\":1}");
+        assertEquals(1, countMatches(errorsOf(producer, "{\"a\":1,\"b\":2,\"c\":3,\"d\":4}"),
+                "expected at most 3 properties"));
+        assertEquals(1, countMatches(errorsOf("{\"maxProperties\":1}", "{\"a\":1,\"b\":2}"),
+                "expected at most 1 properties"));
+        assertOk("{\"maxProperties\":2}", "{\"a\":1,\"b\":2}");
+        assertOk("{\"maxProperties\":0}", "{}");
+        assertEquals(1, countMatches(errorsOf("{\"maxProperties\":0}", "{\"a\":1}"),
+                "expected at most 0 properties"));
+        assertEquals(1, countMatches(errorsOf("{\"minProperties\":2}", "{\"a\":1}"),
+                "expected at least 2 properties"));
+        assertOk("{\"minProperties\":1}", "{\"a\":1}");
+        assertOk("{\"minProperties\":0}", "{}");
+        assertOk("{\"minProperties\":-1}", "{}");   // 负数 = 永远合上 (四份同判 VALID)
+        assertOk("{\"maxProperties\":0}", "[1]");   // 非对象实例不参与
+        // 下面两格是本轮顺手补的一个**真实行为分叉**: 上一版这两支写的是 isInt(), 于是
+        // {"minProperties":1.5} 遇 {"a":1} 被判成"值不配当整数所以不参与"⇒ 绿, 而四份参照在这一格
+        // 上同判红 —— 参照用的是数值比较 (ajv `must NOT have fewer than 1.5 properties` /
+        // jsonschema `'a' has too many... does not have enough properties`). 规范说这两个关键字的
+        // 值该是非负整数, 但"值是浮点"时参照一致而老实现静默, 所以闸放宽到 isNumber().
+        // 旁边没量过的 minItems / maxLength 那一族不跟着改 (见 checkArray / checkString).
+        assertEquals(1, countMatches(errorsOf("{\"minProperties\":1.5}", "{\"a\":1}"),
+                "expected at least 1.5 properties"));
+        assertEquals(1, countMatches(errorsOf("{\"maxProperties\":1.5}", "{\"a\":1,\"b\":2}"),
+                "expected at most 1.5 properties"));
+        // 上下界同在一份 schema 上时各报各的 (both key count bounds: 只有上界那条违)
+        List<String> both = errorsOf("{\"maxProperties\":2,\"minProperties\":1}", "{\"a\":1,\"b\":2,\"c\":3}");
+        assertEquals(1, countMatches(both, "expected at most 2 properties"));
+        assertEquals(0, countMatches(both, "expected at least 1 properties"));
+        // 与 required / patternProperties 同时在场: 谁也不顶掉谁
+        List<String> withReq = errorsOf("{\"required\":[\"a\"],\"minProperties\":3}", "{\"b\":1}");
+        assertEquals(1, countMatches(withReq, "missing required property 'a'"));
+        assertEquals(1, countMatches(withReq, "expected at least 3 properties"));
+        assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"^k_\":{\"type\":\"integer\"}},"
+                + "\"minProperties\":2,\"maxProperties\":3}", "{\"k_a\":1}"), "expected at least 2 properties"));
+        // 值不配当数字时不参与 (#51/#52 同一条 house rule). 这一族的参照**四份都给不出判决**:
+        // ajv 编译期抛 `minProperties value must be ["number"]`, jsonschema 比较时 TypeError ——
+        // 既没有共识可抄, 也不该因此把整份 schema 拒了, 所以取"不参与" + 好写法的阳性对照.
+        assertOk("{\"maxProperties\":\"1\"}", "{\"a\":1,\"b\":2}");
+        assertOk("{\"minProperties\":\"2\"}", "{\"a\":1}");
+        assertEquals(1, countMatches(errorsOf("{\"maxProperties\":1}", "{\"a\":1,\"b\":2}"),
+                "expected at most 1 properties"));
+        assertEquals(1, countMatches(errorsOf("{\"minProperties\":2}", "{\"a\":1}"),
+                "expected at least 2 properties"));
+    }
+
+    @Test
+    public void patternProperties_reaches_named_properties_refs_and_combinators() throws Exception {
+        // 只在文档根上认这一条 = 没认. 下面每一路都对着 ref53 那两张 71 格表的同名格,
+        // 第一格就是 ref53b_py_wire.log 里 $defs.PatternBag 的实际嵌套位置.
+        String nested = "{\"type\":\"object\",\"properties\":{\"bag\":{\"patternProperties\":"
+                + "{\"^k_\":{\"type\":\"integer\"}}}}}";
+        List<String> red = errorsOf(nested, "{\"bag\":{\"k_a\":\"s\"}}");
+        assertEquals(1, countMatches(red, "expected type integer"));
+        assertTrue("路径要一路点到键名: " + red, red.get(0).startsWith("$.bag.k_a:"));
+        // 阳性对照 (钉的是通路): properties 点过名而实例里没有该键 ⇒ 子 schema 不参与求值;
+        // 同名而值不受任何模式盖住 ⇒ 也不该红.
+        assertOk(nested, "{}");
+        assertOk(nested, "{\"bag\":{\"other\":\"s\"}}");
+        String requiredBag = "{\"type\":\"object\",\"properties\":{\"bag\":{\"patternProperties\":"
+                + "{\"^k_\":{\"type\":\"integer\"}}}},\"required\":[\"bag\"]}";
+        assertEquals(1, countMatches(errorsOf(requiredBag, "{}"), "missing required property 'bag'"));
+        // 指针后面
+        assertEquals(1, countMatches(errorsOf("{\"$ref\":\"#/$defs/P\",\"$defs\":{\"P\":{\"patternProperties\":"
+                + "{\"^k_\":{\"type\":\"integer\"}}}}}", "{\"k_a\":\"s\"}"), "expected type integer"));
+        // 数组元素里 / map 的值里 / 自己套自己 (嵌套 map)
+        assertEquals(1, countMatches(errorsOf("{\"type\":\"array\",\"items\":{\"patternProperties\":"
+                + "{\"^k_\":{\"type\":\"integer\"}}}}", "[{\"k_a\":\"s\"}]"), "expected type integer"));
+        assertEquals(1, countMatches(errorsOf("{\"type\":\"object\",\"additionalProperties\":"
+                + "{\"patternProperties\":{\"^k_\":{\"type\":\"integer\"}}}}",
+                "{\"outer\":{\"k_a\":\"s\"}}"), "expected type integer"));
+        assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"^k_\":{\"patternProperties\":"
+                + "{\"^j_\":{\"type\":\"integer\"}}}}}", "{\"k_a\":{\"j_b\":\"s\"}}"),
+                "expected type integer"));
+        // 组合器: 一支都合不上才报 anyOf 那条, 有一支合上就绿 (两格四份同判)
+        assertEquals(1, countMatches(errorsOf("{\"anyOf\":[{\"patternProperties\":{\"^k_\":{\"type\":"
+                + "\"string\"}}},{\"type\":\"array\"}]}", "{\"k_a\":1}"), "does not match any subschema"));
+        assertOk("{\"anyOf\":[{\"patternProperties\":{\"^k_\":{\"type\":\"string\"}}},"
+                + "{\"type\":\"object\"}]}", "{\"k_a\":1}");
+        // not 里面: 子 schema 合上了, not 就违 (inside not 四份同判红)
+        assertEquals(1, countMatches(errorsOf("{\"not\":{\"patternProperties\":{\"^k_\":{\"type\":"
+                + "\"integer\"}}}}", "{\"k_a\":1}"), "not allowed by the not subschema"));
+        // 与 $ref 同级. 这一格在 ref53_crossdiff.py 的名单里登记的是**只在 pair 0 (draft-07 那一双)
+        // 上分叉**: ajv 两方言都红, jsonschema 只有 2020-12 红而 draft-07 判绿 (d7 的 $ref 独占语义),
+        // 所以"2020-12 那一双"读出来是共识红、"draft-07 那一双"读出来才是分叉 —— 名单按对登记,
+        // 不是按"格"一刀切 (这是 #52 那把闸从 union 改成逐对之后才看得见的差别).
+        // 沿 #48/#50 已定的立场 (ref 不吞同级关键字) 取红 —— 这是**立场**, 不能读成"四家共识".
+        assertEquals(1, countMatches(errorsOf("{\"$ref\":\"#/$defs/P\",\"$defs\":{\"P\":{\"type\":\"object\"}},"
+                + "\"patternProperties\":{\"^k_\":{\"type\":\"integer\"}}}", "{\"k_a\":\"s\"}"),
+                "expected type integer"));
+    }
+
+    @Test
+    public void the_pattern_engine_is_javas_so_ecma_only_syntax_still_gets_a_verdict() throws Exception {
+        // patternProperties 用的就是 checkString 里那台 java.util.regex 引擎 (#48 起同一口径).
+        // JSON Schema 指定的是 ECMA-262, 所以宿主方言一定会在某一格上现形: 本轮 71 格里跨实现分叉
+        // 的 5 格有 3 格就是这个原因 (ref53_crossdiff.log 现算: 共有 142 格里分叉 5 格).
+        // 这三格钉的是**边界在哪**, 不是"我们跟了谁" —— 三家在这三格上给的根本不是同一种东西:
+        //   "a\\z" 与 "(?i)K_" : ECMA 不认这两个写法, ajv 在编译期抛 (Invalid escape / Invalid
+        //       group), 而 Python 的 re 与 Java 一样照收 ⇒ 我们红 (_probe53c/Probe.java 现量:
+        //       find("a\\z","a")=true, find("(?i)K_","k_a")=true);
+        //   "a$" 配结尾换行的键: 这一格我原本猜 Java 站 ECMA 那侧, 实测站 Python 那侧 ——
+        //       find("a$","a\n")=true, 即 Java 的 $ 也放过结尾的一个换行 (与 ajv 的 VALID 相反,
+        //       与 jsonschema 的 INVALID 相同). 猜错的过程留在注释里, 因为它正是"凭方言印象写断言"
+        //       的代价, 这三格的读数一律以探针现量为准而不是以规范措辞为准.
+        assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"a\\\\z\":{\"type\":\"integer\"}}}",
+                "{\"a\":\"s\"}"), "expected type integer"));
+        assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"(?i)K_\":{\"type\":\"integer\"}}}",
+                "{\"k_a\":\"s\"}"), "expected type integer"));
+        assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"a$\":{\"type\":\"integer\"}}}",
+                "{\"a\\n\":\"s\"}"), "expected type integer"));
+        // 剩下两格是政策格: 参照给不出判决时, 认得的关键字仍要给确定结论 (不静默放行、也不抛):
+        //   编译不过的正则 —— ajv THREW `Unterminated character class` / jsonschema RAISED
+        //     PatternError, 两家都没判实例;
+        //   关键字本身不是对象 / 值不是份 schema —— ajv 一份抛一份默默 VALID, jsonschema 两份全崩.
+        assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"[(\":{\"type\":\"integer\"}}}",
+                "{\"a\":1}"), "malformed pattern in schema"));
+        assertEquals(1, countMatches(errorsOf("{\"patternProperties\":\"nope\"}", "{\"k_a\":1}"),
+                "patternProperties must be an object of schemas"));
+        assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"^k_\":\"not a schema\"}}",
+                "{\"k_a\":1}"), "a schema must be an object or a boolean"));
+        assertEquals(1, countMatches(errorsOf("{\"propertyNames\":\"x\"}", "{\"a\":1}"),
+                "a schema must be an object or a boolean"));
+        // 阳性对照: 上面四格的红都只来自那一格坏写法. 同一条 schema 换成好写法, 判定要跟着翻回来.
+        assertOk("{\"patternProperties\":{\"^k_\":{\"type\":\"integer\"}}}", "{\"k_a\":1}");
+        assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"^k_\":{\"type\":\"integer\"}}}",
+                "{\"k_a\":\"s\"}"), "expected type integer"));
+    }
 }
