@@ -32,6 +32,13 @@ public class JsonSchemaValidatorTest {
         return validator.validate(json(schema), json(instance));
     }
 
+    /** 按消息内容数条数: 光数总数会把"一支关键字冒充另一支"读成通过. */
+    private static int countMatches(List<String> messages, String needle) {
+        int n = 0;
+        for (String m : messages) if (m.contains(needle)) n++;
+        return n;
+    }
+
     @Test
     public void required_and_types() throws Exception {
         String s = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},"
@@ -569,5 +576,137 @@ public class JsonSchemaValidatorTest {
                 "{\"a\":\"x\"}");
         // 同理 definitions 里的布尔 false 也不该凭空否决一个实例
         assertOk("{\"definitions\":{\"X\":false}}", "5");
+    }
+
+    // =====================================================================
+    // #50: const.
+    //
+    // 病相不是设想的: 官方 python SDK 1.27.1 + pydantic 2.12.5 交 wire 时按 Literal 的元数分岔
+    //   convert -> {"const":"celsius","default":"celsius","title":"Unit","type":"string"}
+    //   pick    -> {"default":"up","enum":["up","down"],"title":"Direction","type":"string"}
+    // 两种元数各量过一个 bool / int 版本, 四行读数在 ~/.cache/zmcp_prey/ref50_py_wire.log
+    // (产出它的 ref50_py_wire.py 就在旁边; 走的是真 FastMCP 的 list_tools(), 不是推测).
+    // 多值那一支早有 enum 兜着, 单值这一支一直落在"未知关键字不作约束"的政策里 ⇒ 一个广告
+    // "单位只能是 celsius"的工具, 传 fahrenheit 也照样执行.
+    //
+    // 期望值来自盘上两份参照 × 各两种方言的逐格读数:
+    //   ajv 8.20.0        tsclient/ref50_const_oracle.log (27 格, 含自检: 全 VALID 当场 FATAL)
+    //   jsonschema 4.26.0 ref50_const_oracle_py.log       (31 格, 同一条闸)
+    // 共有的 54 格 (27 × 两方言) 判类逐格相同: 对象与键序无关、数组与次序有关、1 不等于 true、
+    // 0 不等于 False、1 与 1.0 同值 —— 也就是说与 enum 用的是同一套 JSON 相等.
+    // py 那侧多出的 4 格是 JS 里量不出差别的 (1 与 1.0、False 与 0 在 JS 里就是同一个值).
+    // 唯一分叉还是 draft-07 的元组写法在 2020-12 参照下编译不过 (ajv 抛 / jsonschema AttributeError),
+    // #49 已记过, 这里不重复.
+    // =====================================================================
+
+    @Test
+    public void a_const_from_a_real_client_actually_constrains_the_argument() throws Exception {
+        // ref50_py_wire.log 里那一份 inputSchema 的字节, 一个字段都不改:
+        String s = "{\"properties\":{\"unit\":{\"const\":\"celsius\",\"default\":\"celsius\","
+                + "\"title\":\"Unit\",\"type\":\"string\"},\"value\":{\"title\":\"Value\","
+                + "\"type\":\"integer\"}},\"required\":[\"value\"],\"title\":\"convertArguments\","
+                + "\"type\":\"object\"}";
+        assertOk(s, "{\"value\":1,\"unit\":\"celsius\"}");
+        // 单位整个不提是合法的 (它不在 required 里) —— 参照两侧都判 VALID,
+        // 见两份日志的 "const on an absent optional property" 两行. 这一格防的就是
+        // "把缺失的键也顺手判成违规"那种实现.
+        assertOk(s, "{\"value\":1}");
+        List<String> e = errorsOf(s, "{\"value\":1,\"unit\":\"fahrenheit\"}");
+        assertFalse("const 被当成了未知关键字放行: " + e, e.isEmpty());
+        assertEquals("一条违规就够, 分支内部不许外溢: " + e, 1, e.size());
+        assertTrue("要报在那一个参数上: " + e, e.get(0).startsWith("$.unit:"));
+        assertTrue("要说清期望的是哪个常量: " + e, e.get(0).contains("celsius"));
+        // 同一个 SDK 对 bool / int 的单值 Literal 也走 const (ref50_py_wire.log 的后两行).
+        // 单列这两支是因为它们的常量不是字符串: false / 8 都是"类型合上而常量不合",
+        // 与上面 celsius 那一格走的不是同一条相等分支.
+        String flag = "{\"const\":true,\"default\":true,\"title\":\"Flag\",\"type\":\"boolean\"}";
+        assertOk(flag, "true");
+        assertFalse("布尔常量没管住: ", errorsOf(flag, "false").isEmpty());
+        String seven = "{\"const\":7,\"default\":7,\"title\":\"N\",\"type\":\"integer\"}";
+        assertOk(seven, "7");
+        assertFalse("整型常量没管住: ", errorsOf(seven, "8").isEmpty());
+    }
+
+    @Test
+    public void const_uses_json_equality_not_string_or_java_equality() throws Exception {
+        // 对象: 键序无关而值的类型有关 (ajv 与 jsonschema 同判: key order VALID / value type INVALID)
+        assertOk("{\"const\":{\"a\":1,\"b\":2}}", "{\"b\":2,\"a\":1}");
+        assertFalse(errorsOf("{\"const\":{\"a\":1}}", "{\"a\":\"1\"}").isEmpty());
+        // 数组: 次序参与相等
+        assertOk("{\"const\":[1,2]}", "[1,2]");
+        assertFalse(errorsOf("{\"const\":[1,2]}", "[2,1]").isEmpty());
+        assertOk("{\"const\":[]}", "[]");
+        // 布尔与数字互不相等, 两个方向都试 (jsonschema: "const number vs true" / "const true vs 1")
+        assertFalse(errorsOf("{\"const\":1}", "true").isEmpty());
+        assertFalse(errorsOf("{\"const\":true}", "1").isEmpty());
+        assertFalse(errorsOf("{\"const\":0}", "false").isEmpty());
+        assertFalse(errorsOf("{\"const\":false}", "0").isEmpty());
+        // null 只与 null 相等
+        assertOk("{\"const\":null}", "null");
+        assertFalse(errorsOf("{\"const\":null}", "0").isEmpty());
+        // 整值的浮点是同一个 JSON 数值 —— enum 早就是这么判的, const 不能另立一套
+        assertOk("{\"const\":1}", "1.0");
+        assertOk("{\"const\":1.0}", "1");
+        assertFalse(errorsOf("{\"const\":1}", "1.5").isEmpty());
+    }
+
+    @Test
+    public void const_and_type_each_report_their_own_violation() throws Exception {
+        // 参照两侧在这格都交**两条**违规 (ajv: "must be string | must be equal to constant";
+        // jsonschema: "'x' was expected | 1 is not of type 'string'") ⇒ const 不能排在 type
+        // 那条提前 return 之后, 否则类型一错就再也问不到常量.
+        List<String> both = errorsOf("{\"type\":\"string\",\"const\":\"x\"}", "1");
+        assertEquals("两条违规该各报各的: " + both, 2, both.size());
+        assertEquals("缺的是 const 那一条: " + both, 1, countMatches(both, "is not the constant"));
+        assertEquals("缺的是 type 那一条: " + both, 1, countMatches(both, "expected type string"));
+        assertOk("{\"type\":\"string\",\"const\":\"x\"}", "\"x\"");
+        // const 与 enum 同时在场: 两支独立关键字, 各问各的. 这四格的期望值不是推的 ——
+        // 是两份参照 × 双方言逐格量出来的 (ref50 两份日志的 "const+enum both violated" 四行:
+        // both violated 交两条, 只合一支时只剩另一支那一条, both ok 全绿).
+        // 按消息内容各数一遍而不是只数总数: 光看"2 条"会把"enum 一支冒充两支"读成通过.
+        String bothKept = "{\"const\":\"a\",\"enum\":[\"b\",\"c\"]}";
+        List<String> neither = errorsOf(bothKept, "\"d\"");
+        assertEquals("两条独立关键字该各报一条: " + neither, 2, neither.size());
+        assertEquals("const 那一条要在: " + neither, 1, countMatches(neither, "is not the constant"));
+        assertEquals("enum 那一条不能丢: " + neither, 1, countMatches(neither, "not in enum"));
+        List<String> onlyEnum = errorsOf(bothKept, "\"a\"");
+        assertEquals("常量合上而枚举不合, 该只剩 enum 一条: " + onlyEnum, 1, onlyEnum.size());
+        assertTrue(onlyEnum.get(0).contains("not in enum"));
+        List<String> onlyConst = errorsOf(bothKept, "\"b\"");
+        assertEquals("枚举合上而常量不合, 该只剩 const 一条: " + onlyConst, 1, onlyConst.size());
+        assertTrue(onlyConst.get(0).contains("is not the constant"));
+        assertOk("{\"const\":\"a\",\"enum\":[\"a\",\"c\"]}", "\"a\"");
+    }
+
+    @Test
+    public void const_reaches_tuple_positions_refs_and_combinators() throws Exception {
+        // 只在顶层认 const 等于没认: pydantic 的 const 永远住在 properties 里, 而嵌套模型
+        // 住在 $ref 背后 (#48 那一批). 下面每一格的期望值都点着参照里的具体行.
+        List<String> pos = errorsOf("{\"type\":\"array\",\"items\":[{\"const\":\"a\"}]}", "[\"b\"]");
+        assertFalse("draft-07 元组位置上的 const 没生效: " + pos, pos.isEmpty());
+        assertTrue("要报在下标上: " + pos, pos.get(0).startsWith("$[0]:"));
+        assertFalse("prefixItems 位置上的 const 没生效: ",
+                errorsOf("{\"type\":\"array\",\"prefixItems\":[{\"const\":\"a\"}]}", "[\"b\"]").isEmpty());
+        assertOk("{\"type\":\"array\",\"prefixItems\":[{\"const\":\"a\"}]}", "[\"a\"]");
+        // 尾巴那份 schema 里的 const (ajv: /1 must be equal to constant)
+        String tail = "{\"type\":\"array\",\"items\":[{\"const\":\"a\"}],"
+                + "\"additionalItems\":{\"const\":\"z\"}}";
+        assertOk(tail, "[\"a\",\"z\"]");
+        List<String> tailWrong = errorsOf(tail, "[\"a\",\"b\"]");
+        assertFalse("尾巴上的 const 没生效: " + tailWrong, tailWrong.isEmpty());
+        assertTrue("要报在尾巴那一格上: " + tailWrong, tailWrong.get(0).startsWith("$[1]:"));
+        // $ref 背后 (ref50 两份日志的 "const inside $ref target" 格)
+        List<String> viaRef = errorsOf("{\"$ref\":\"#/$defs/C\",\"$defs\":{\"C\":{\"const\":\"a\"}}}", "\"b\"");
+        assertFalse("$ref 目标里的 const 没生效: " + viaRef, viaRef.isEmpty());
+        // anyOf 分支里 (两份参照: "c is not valid under any of the given schemas")
+        String any = "{\"anyOf\":[{\"const\":\"a\"},{\"const\":\"b\"}]}";
+        assertOk(any, "\"b\"");
+        assertFalse("anyOf 分支里的 const 没生效: ",
+                errorsOf(any, "\"c\"").isEmpty());
+        // map 的值 (additionalProperties 那份 schema) 里的 const
+        assertFalse("additionalProperties 里的 const 没生效: ",
+                errorsOf("{\"type\":\"object\",\"additionalProperties\":{\"const\":1}}",
+                        "{\"k\":2}").isEmpty());
+        assertOk("{\"type\":\"object\",\"additionalProperties\":{\"const\":1}}", "{\"k\":1,\"j\":1}");
     }
 }

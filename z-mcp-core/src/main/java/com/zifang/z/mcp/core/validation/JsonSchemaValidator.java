@@ -17,7 +17,7 @@ import java.util.regex.PatternSyntaxException;
  *
  * <p>覆盖 MCP 工具 schema 实际会用到的关键字: type / required / properties /
  * items (单份 schema、布尔、**数组形式**三种) / prefixItems / additionalItems /
- * enum / additionalProperties / minimum / maximum / minLength / maxLength /
+ * enum / const / additionalProperties / minimum / maximum / minLength / maxLength /
  * pattern / minItems / maxItems / nullable, 外加 refs 与组合子: $ref / $defs /
  * definitions / allOf / anyOf / oneOf / not.
  *
@@ -116,6 +116,17 @@ public class JsonSchemaValidator {
 
         if (schema.has("enum") && !inEnum(schema.get("enum"), node)) {
             errors.add(path + ": value " + literal(node) + " not in enum " + schema.get("enum"));
+        }
+        // const 与 enum 是两条独立关键字, 用的是同一套 JSON 相等 (1 与 1.0 同值, 而 1 不等于 true、
+        // 0 不等于 False, 对象与键序无关而数组与次序有关). 真值: ajv 8.20.0 的 27 格 × 双方言
+        // 与 jsonschema 4.26.0 的 31 格 × 双方言, 共有的 54 格判类逐格相同
+        // (tsclient/ref50_const_oracle.log 与 ref50_const_oracle_py.log).
+        // 排在 type 那条提前 return **之前**: 参照在两支都不合时交两条违规 ("must be string |
+        // must be equal to constant"), 排后面就再也问不到常量. {"const":null} 也照样参与判定 ——
+        // 实测 has() 对显式 null 返回 true, 所以这里取 get() 不为绕 has(), 只是少一次查找.
+        JsonNode constant = schema.get("const");
+        if (constant != null && !jsonEquals(constant, node)) {
+            errors.add(path + ": value " + literal(node) + " is not the constant " + literal(constant));
         }
 
         JsonNode typeNode = schema.get("type");
@@ -439,12 +450,25 @@ public class JsonSchemaValidator {
 
     private static boolean inEnum(JsonNode enumNode, JsonNode value) {
         if (value == null) return false;
-        for (JsonNode candidate : enumNode) {
-            if (candidate.equals(value)) return true;
-            if (candidate.isNumber() && value.isNumber()
-                    && Double.compare(candidate.asDouble(), value.asDouble()) == 0) return true;
-        }
+        for (JsonNode candidate : enumNode) if (jsonEquals(candidate, value)) return true;
         return false;
+    }
+
+    /**
+     * JSON 意义上的相等, enum 与 const 共用 (规范里 const 就是"单值 enum").
+     *
+     * <p>对象比键值集合因而与书写顺序无关、数组按次序比、字符串不比 Java 引用: 这些都是
+     * {@link JsonNode#equals} 给的. 额外补一条数字闸是因为 Jackson 并不跨数字类型比相等 ——
+     * 实测 jackson-databind 2.13.5 / 2.15.4 / 2.18.9 三版上
+     * {@code IntNode(1).equals(DoubleNode(1.0))} 都是 false (~/.cache/zmcp_prey/ref50_jackson_probe.log),
+     * 而 JSON 里它们是同一个数值; 两份参照校验器都判同值 (ref50 两份日志的
+     * "const int vs int-valued float" / "const float vs int-valued float" 两格).
+     */
+    private static boolean jsonEquals(JsonNode a, JsonNode b) {
+        if (a == null || b == null) return false;
+        if (a.equals(b)) return true;
+        return a.isNumber() && b.isNumber()
+                && Double.compare(a.asDouble(), b.asDouble()) == 0;
     }
 
     private static boolean matchesType(String expected, JsonNode node) {
