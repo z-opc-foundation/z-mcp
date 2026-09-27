@@ -4,6 +4,8 @@ import com.zifang.z.mcp.core.properties.McpProperties;
 import com.zifang.z.mcp.core.protocol.McpSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.MediaType;
+import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
@@ -13,8 +15,10 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.Executors;
@@ -345,6 +349,96 @@ public class McpSessionStore {
             public synchronized String reason() { return reason; }
         }
 
+        /**
+         * 一帧一个写出单元.
+         *
+         * <p>不用 {@code SseEmitter.event()} 那一族 builder: 它把一帧拆成三个写出片段
+         * ({@code id:N\ndata:} 前缀 / JSON 体 / 结尾换行), 每个片段各 flush 一次, 于是**帧内**留下两道缝。
+         * 这台仓里有闸直接读边界({@code ZMcpSseFrameAtomicityTest}, 原始 socket 上按 HTTP chunk 数写出单元):
+         * 改之前一条 {@code list_changed} 事件是 3 个写出单元, 而 CI 上那条 {@code Premature EOF} 每次红,
+         * 客户端手里都是恰好第一个写出单元的内容
+         * ({@code 读到: id:2}) —— 容器在缝里把连接收走了, 半截帧就到了客户端手上。自己攒整帧交出去之后
+         * 帧内没有缝: 写出要么整帧落地、要么一帧都不落地, 客户端的位置永远停在完整帧上, 续传契约
+         * (按 Last-Event-ID 补)才有意义。它不保证流不会被收走 —— 帧与帧之间照样能切, 那一半由
+         * {@code ZMcpSseAbandonResumeStressTest} 断言"切开不许丢事件"。
+         *
+         * <p>字节与拆帧写法逐字相同: {@link WholeFrame} 只改"几个写出单元", 不改一个字节, 也不改
+         * 载荷走的那个转换器与字符集(见 {@link WholeFrame} 里 mediaType 那一句)。
+         */
+        private static SseEmitter.SseEventBuilder eventFrame(String id, String json) {
+            return new WholeFrame("id:" + id + "\ndata:" + json + "\n\n");
+        }
+
+        /**
+         * 开流帧: 注释 + 可选 {@code retry} + 可选 priming(只给坐标、不给消息的空 data 事件), 以空行收尾。
+         *
+         * <p>注释帧与 priming 合在**同一个写出单元**里不是为了少写一次, 而是为了字节与旧写法逐字相同 ——
+         * 旧写法把注释/retry/id/data 前缀攒在同一段文本里, 只有结尾换行自成一片(实测旧的是 2 片,
+         * 拼起来 {@code :注释\nretry:3000\nid:1\ndata:\n\n}), 拆成两次写出会在中间多出一个空行,
+         * 而多出来的空行会把 priming 变成"另一帧"。
+         * {@code primeId == null}(客户端版本读不动空 data, 或不配 retry)时相应字段就不出现。
+         */
+        private static SseEmitter.SseEventBuilder openFrame(String comment, long retryMs, String primeId) {
+            StringBuilder frame = new StringBuilder(":").append(comment).append('\n');
+            if (retryMs > 0) frame.append("retry:").append(retryMs).append('\n');
+            if (primeId != null) frame.append("id:").append(primeId).append("\ndata:\n");
+            return new WholeFrame(frame.append('\n').toString());
+        }
+
+        /** 纯注释帧(心跳): 不带 id 也不带 data, 所以它不能占事件序号. */
+        private static SseEmitter.SseEventBuilder commentFrame(String comment) {
+            return new WholeFrame(":" + comment + "\n\n");
+        }
+
+        /**
+         * 只含一个写出片段的 {@code SseEventBuilder}: 把一整帧作为一次 {@code send} 交出去.
+         *
+         * <p>为什么要有这么个东西 —— {@code SseEmitter} 没有"把这段字节原样写一次"的口子:
+         * <ul>
+         *   <li>{@code send(Object)} 看着像, 但它不是: 字节码里它是 {@code event().data(object, mt)}
+         *       的语法糖, 于是整帧会被塞进一个 {@code data:} 字段。实测(把整帧交给 {@code send(String)})
+         *       上线的是 {@code data:id:1\ndata:{...}\n\n\n\n} —— event id 这个字段消失了(续传坐标没了),
+         *       而载荷成了 {@code id:1\n{...}}, 任何按 JSON 解析的客户端都会当场报错。这条改法是本机
+         *       {@code ZMcpSseFrameAtomicityTest} 的第一批红抓出来的, 不是推演。</li>
+         *   <li>{@code send(SseEventBuilder)} 走的是 {@code invokespecial ResponseBodyEmitter.send},
+         *       也就是**绕过**上面那个包装, 逐片原样写出。所以"一帧一片"是它能表达的形状, 而
+         *       {@code event()} 造不出这一片(它的 {@code data()} 必然把前缀与载荷分成两片)。</li>
+         * </ul>
+         *
+         * <p>mediaType 取 {@code null} —— 与 {@code event().data(json)} 交给转换器的那一枚是同一个值
+         * (实测 {@code data(Object)} 就是 {@code data(Object, null)}), 于是载荷的转换器选择与字符集
+         * 逐字不变: 改的只有"几次写出", 不是"写出的字节"。取 null 是"与库自己的取值一致", 不是"保住
+         * 编码" —— 实测把它换成 {@code TEXT_PLAIN}, 线上的字节、chunk 边界与响应的 Content-Type 三样
+         * 全都不动(368 条一条不红), 所以这一处没有尺能钉住, 别把它当成有守卫的不变量。
+         *
+         * <p>那六个 fluent 方法一律拒: 这个类的全部用途是"承载一段已经攒好的帧", 允许调用方在它上面
+         * 继续 {@code id()}/{@code data()} 只会重新攒出缝来。
+         */
+        private static final class WholeFrame implements SseEmitter.SseEventBuilder {
+
+            private final Set<ResponseBodyEmitter.DataWithMediaType> parts;
+
+            WholeFrame(String frame) {
+                this.parts = new LinkedHashSet<ResponseBodyEmitter.DataWithMediaType>(1);
+                this.parts.add(new ResponseBodyEmitter.DataWithMediaType(frame, null));
+            }
+
+            @Override
+            public Set<ResponseBodyEmitter.DataWithMediaType> build() { return parts; }
+
+            @Override public SseEmitter.SseEventBuilder id(String id) { throw readOnly(); }
+            @Override public SseEmitter.SseEventBuilder name(String name) { throw readOnly(); }
+            @Override public SseEmitter.SseEventBuilder reconnectTime(long ms) { throw readOnly(); }
+            @Override public SseEmitter.SseEventBuilder comment(String comment) { throw readOnly(); }
+            @Override public SseEmitter.SseEventBuilder data(Object object) { throw readOnly(); }
+            @Override public SseEmitter.SseEventBuilder data(Object object, MediaType mt) { throw readOnly(); }
+
+            private static UnsupportedOperationException readOnly() {
+                return new UnsupportedOperationException(
+                        "WholeFrame 只承载已经攒好的帧: 在它上面继续拼字段等于把缝重新留在帧里");
+            }
+        }
+
         /** 向所有已建立的 SSE 流推一条通知. */
         public void emit(String json) {
             List<SseEmitter> copy;
@@ -366,7 +460,7 @@ public class McpSessionStore {
             String id = String.valueOf(eventId);
             for (SseEmitter e : copy) {
                 try {
-                    e.send(SseEmitter.event().id(id).data(json));
+                    e.send(eventFrame(id, json));
                 } catch (Exception ex) {
                     emitters.remove(e);
                     // 摘掉名单不等于收掉那条请求: Spring 的 send() 在写失败时只置 sendFailed 并把异常
@@ -426,20 +520,18 @@ public class McpSessionStore {
                     }
                 }
                 for (StreamEvent e : replay) {
-                    emitter.send(SseEmitter.event().id(String.valueOf(e.id)).data(e.json));
+                    emitter.send(eventFrame(String.valueOf(e.id), e.json));
                 }
-                SseEmitter.SseEventBuilder prime = SseEmitter.event().comment(comment);
-                if (retryMs > 0) prime.reconnectTime(retryMs);
                 // 空 data 是协议点名的 priming 形状: 只给一个可续传的坐标, 不是一条消息。
                 // 但只有 >= 2025-11-25 的客户端读得动它 —— 更早的实现会把空 data 当成一条
                 // JSON-RPC 消息去 parse。注释帧与 retry 照发: 它们是标准 SSE 字段, 老客户端
                 // 最多忽略注释, 不会碰 JSON。
-                if (McpSchema.supportsEmptySseData(protocolVersion)) {
-                    // 取号在闸**里面**: 一个从不发出去的 id 会在序列上留个洞, 而流上的 id
-                    // 唯一的含义就是"客户端读到过它"
-                    prime.id(String.valueOf(nextSeq())).data("");
-                }
-                emitter.send(prime);
+                // 取号在闸**里面**: 一个从不发出去的 id 会在序列上留个洞, 而流上的 id
+                // 唯一的含义就是"客户端读到过它"
+                String primeId = McpSchema.supportsEmptySseData(protocolVersion)
+                        ? String.valueOf(nextSeq())
+                        : null;
+                emitter.send(openFrame(comment, retryMs, primeId));
                 emitters.add(emitter);
                 return replay.size();
             }
@@ -472,7 +564,7 @@ public class McpSessionStore {
             int sent = 0;
             for (SseEmitter e : copy) {
                 try {
-                    e.send(SseEmitter.event().comment(KEEP_ALIVE_COMMENT));
+                    e.send(commentFrame(KEEP_ALIVE_COMMENT));
                     sent++;
                 } catch (Exception ex) {
                     emitters.remove(e);
