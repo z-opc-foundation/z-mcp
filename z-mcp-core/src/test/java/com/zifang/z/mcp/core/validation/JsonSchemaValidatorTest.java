@@ -651,6 +651,17 @@ public class JsonSchemaValidatorTest {
         assertOk("{\"const\":1}", "1.0");
         assertOk("{\"const\":1.0}", "1");
         assertFalse(errorsOf("{\"const\":1}", "1.5").isEmpty());
+        // 同一件事在**嵌套一层**之后还成立吗? #50 那批 const 格子全住在顶层, 顶层有 Jackson 自己的
+        // equals 兜着 ⇒ 补下面三格当靶. 该不该补是量出来的: 嵌套里 Jackson 自己**不**比数值 (三版
+        // 实测 `[[1],[1.0]]` equals=false, ref52_jackson_nested.log) ⇒ 递归那两闸没人管的话漏的正是
+        // 这一格. 参照四份逐格同判 (ref52_const_nested_py.log / tsclient/ref52_const_nested_js.log:
+        // 数值漂移两格 VALID、`deep leaf differs` INVALID、键序那格 VALID), 但要写清 ajv 在数值漂移
+        // 那两格上是**空判** —— JS 字面量 `{ a: 1.0 }` 进 ajv 之前就被归成 `1` (probe.js 第 6—7 行),
+        // 真判到"漂移后仍相等"的是 jsonschema 那两方言. 网格侧 M57/M58 (摘掉递归的两闸) 各交**两条**
+        // 具名红: const 这一支 + uniqueItems 那一支, 台账 tree52_mut_ledger.md 里就是那两行.
+        assertOk("{\"const\":{\"a\":1}}", "{\"a\":1.0}");
+        assertOk("{\"const\":[1]}", "[1.0]");
+        assertFalse(errorsOf("{\"const\":{\"a\":[1]}}", "{\"a\":[2]}").isEmpty());
     }
 
     @Test
@@ -882,5 +893,184 @@ public class JsonSchemaValidatorTest {
         List<String> numericForm = errorsOf("{\"minimum\":5,\"exclusiveMinimum\":5.5}", "5.2");
         assertEquals(1, countMatches(numericForm, "exclusiveMinimum"));
         assertEquals(0, countMatches(numericForm, " < minimum"));
+    }
+
+    @Test
+    public void uniqueItems_true_rejects_the_duplicate_a_real_producer_declared() throws Exception {
+        // 这一族的形状不是设想的: pydantic 2.12.5 的 set[str] / set[int] / frozenset[str] 在真
+        // list_tools() 的 inputSchema 里一律带 "uniqueItems": true (ref52_py_wire.py → .log,
+        // 计数 5 = 这五种里的五处出现, 同页对照 list[int] 不带).
+        // 在它不作约束之前, 广告「只能是一组互异的值」的参数传 [1,1] 照过.
+        String u = "{\"uniqueItems\":true}";
+        assertOk(u, "[1,2]");
+        assertOk(u, "[]");
+        assertOk(u, "[7]");
+        List<String> dup = errorsOf(u, "[1,1]");
+        assertEquals(1, countMatches(dup, "uniqueItems"));
+        // 下标要点出来: 只说"有重复"而不出是哪两个元素, 运维拿到的红行没法定位. 这一半是**我们的**
+        // 选择不是照抄 —— ajv 给下标 ("items ## 0 and 1 are identical"), jsonschema 只把整份实例
+        // 报回来 ("[1, 1] has non-unique elements", ref52 两份日志的 ints duplicated 四行).
+        assertTrue("红行里要有那一对的下标: " + dup, dup.get(0).contains("## 0 and 1"));
+        assertEquals(1, countMatches(errorsOf(u, "[1,2,3,3,4]"), "## 2 and 3"));
+        assertEquals(1, countMatches(errorsOf(u, "[1,2,3,1]"), "## 0 and 3"));
+        // 只给一条判定则是量出来的 (53 格表新增的 three duplicate pairs, 四份都只回一条): 三对重复
+        // 铺开成三条会比参照多红, 而"几家给几条"才是这一格里两家同档的那一半.
+        assertEquals(1, errorsOf(u, "[1,1,2,2,3,3]").size());
+    }
+
+    @Test
+    public void uniqueness_is_json_value_equality_not_node_or_string_equality() throws Exception {
+        // 这一支整支都在钉一件事: "互异"比的是 JSON 数值, 不是宿主节点的相等.
+        // 前两批格子的参照读数在 ref52 两份日志里四份同判; 后面那批 assertOk 是**阳性对照的
+        // 反面** —— 一条"看着像数字就算重复"的糊规则会把它们也判红, 那比漏判更容易被忽略.
+        String u = "{\"uniqueItems\":true}";
+        assertEquals(1, countMatches(errorsOf(u, "[1,1.0]"), "uniqueItems"));
+        assertEquals(1, countMatches(errorsOf(u, "[1000,1e3]"), "uniqueItems"));
+        assertEquals(1, countMatches(errorsOf(u, "[0,-0]"), "uniqueItems"));
+        assertEquals(1, countMatches(errorsOf(u, "[0.0,-0.0]"), "uniqueItems"));
+        // 嵌套那一层 Jackson 自己不比数值 (实测三版一致: [[1],[1.0]] equals=false,
+        // ~/.cache/zmcp_prey/ref52_jackson_nested.log), 所以"复用 #50 那条 jsonEquals"在这里
+        // 只复用对了一半 —— 下面三格是那一半的尺.
+        assertEquals(1, countMatches(errorsOf(u, "[[1],[1.0]]"), "uniqueItems"));
+        assertEquals(1, countMatches(errorsOf(u, "[{\"a\":1},{\"a\":1.0}]"), "uniqueItems"));
+        assertEquals(1, countMatches(errorsOf(u, "[[{\"a\":[1]}],[{\"a\":[1.0]}]]"), "uniqueItems"));
+        assertEquals(1, countMatches(errorsOf(u, "[{\"a\":1,\"b\":2},{\"b\":2,\"a\":1}]"), "uniqueItems"));
+        // 键序不参与而**字段数**参与: 这一格与上面那格是一对, 缺了它"逐字段比"之外那道长度闸就没人管
+        // (数组侧的同形闸由 [[],[[]]] 那一格管). 参照读数: 四份同判 VALID (53 格表的
+        // "uniqueItems object with an extra key" 四行).
+        assertOk(u, "[{\"a\":1},{\"a\":1,\"b\":2}]");
+        assertEquals(1, countMatches(errorsOf(u, "[[\"x\"],[\"x\"]]"), "uniqueItems"));
+        assertEquals(1, countMatches(errorsOf(u, "[null,null]"), "uniqueItems"));
+        // 序参与、类型参与、精度参与 ⇒ 都该是互异的
+        assertOk(u, "[[1,2],[2,1]]");
+        assertOk(u, "[[1],[1.5]]");
+        assertOk(u, "[1,\"1\"]");
+        assertOk(u, "[true,1]");
+        assertOk(u, "[false,0]");
+        assertOk(u, "[null,false]");
+        assertOk(u, "[[],[[]]]");
+        assertOk(u, "[0.3,0.30000000000000004]");
+        // 溢出成 Infinity 的两格, 各钉一条不同的路 (第一格原本被我写成"走 BigDecimal 的兜路",
+        // 那是错的): [1e1000,1e1001] 两个都解析成 DoubleNode(POSITIVE_INFINITY), 而 Jackson 自己的
+        // equals 就是 true (三版同读数, ref52_bignum_java.log), 所以它在 jsonEquals **第一行**就判
+        // 完了, 走不到 sameNumber; 真正走 catch 的是 [1e1000,5] —— 两个节点不等值 ⇒ 进 sameNumber ⇒
+        // decimalValue() 对 Infinity 抛 NumberFormatException (同一份实测), 那半条兜路决定这一格
+        // 是不是"互异". 后半句不是推的: 单独把 M62 (摘掉整条 try/catch) 打上、只跑这一支, 盘上那
+        // 一条红正落在下面的 assertOk 那一行 (m62_where.py → ref52_m62_where.log), 而且报的是
+        // Errors 不是 Failures —— 抛穿出来的异常不经断言. 网格那 63 支只记"哪一支测试红了",
+        // 单支这一跑才答得出"红在哪一格".
+        // 参照两家在这里与我们同档 (四份都饱和成 inf 并判重复, 见两份 oracle 日志的
+        // `uniqueItems both overflow to infinity` 四行).
+        assertEquals(1, countMatches(errorsOf(u, "[1e1000,1e1001]"), "uniqueItems"));
+        assertOk(u, "[1e1000,5]");
+        // 这一格**故意不在**那 53 格共有表里, 且不是忘了加: 20 位整数在 IEEE double 下饱和成同一个
+        // 值, 实测两份参照因此在**宿主精度**上分叉 —— ajv 两方言都判重复 ("items ## 0 and 1 are
+        // identical", tsclient/ref52_bignum_probe.js), jsonschema 两方言都判互异 (ref52_bignum_py.log).
+        // 按 #51 立的规矩这类格子不进共有表; 钉在这儿是我们的立场: sameNumber 走 BigDecimal,
+        // 保住精确那一半, 与"参照里较严格的一家"同判纯属巧合, 依据是上面那条实测分叉.
+        assertOk(u, "[10000000000000000001,10000000000000000002]");
+    }
+
+    @Test
+    public void uniqueItems_reports_alongside_item_and_size_constraints() throws Exception {
+        // 三条关键字各报各的: 只数总条数会把"互异那条借用了 items 的判定"读成通过.
+        List<String> dupOnly = errorsOf("{\"type\":\"array\",\"minItems\":2,"
+                + "\"items\":{\"type\":\"integer\"},\"uniqueItems\":true}", "[1,1]");
+        assertEquals(1, countMatches(dupOnly, "uniqueItems"));
+        assertEquals(0, countMatches(dupOnly, "expected at least"));
+        assertEquals(0, countMatches(dupOnly, "expected type integer"));
+        List<String> both = errorsOf("{\"type\":\"array\",\"items\":{\"type\":\"integer\"},"
+                + "\"uniqueItems\":true}", "[1.5,1.5]");
+        assertEquals(1, countMatches(both, "uniqueItems"));
+        assertEquals(2, countMatches(both, "expected type integer"));
+        // maxItems 与互异同时违: 各给一条, 不互相顶掉
+        List<String> two = errorsOf("{\"type\":\"array\",\"maxItems\":1,\"uniqueItems\":true}", "[1,1]");
+        assertEquals(1, countMatches(two, "expected at most"));
+        assertEquals(1, countMatches(two, "uniqueItems"));
+    }
+
+    @Test
+    public void uniqueItems_reaches_named_properties_refs_tuples_and_combinators() throws Exception {
+        // 只在文档根上认这一条 = 没认. 下面每一路都对应 ref52 两份日志里的一格, 但**不是**每格都
+        // 四份同判: inside prefixItems position / inside tuple items array / true beside array-form
+        // items 那三格是**方言差** (draft-07 那两家看不见 2020-12 的写法, 2020-12 那两家对数组形式
+        // items 一份崩一份拒), 那几路走 #49 定的"认得就管"而不是照抄参照. 同名的
+        // true beside prefixItems 那一格倒是四份同判红 —— 别把它也算进分叉那一族.
+        List<String> named = errorsOf("{\"type\":\"object\",\"properties\":{\"tags\":{\"uniqueItems\":true}}}",
+                "{\"tags\":[\"a\",\"a\"]}");
+        assertEquals(1, countMatches(named, "uniqueItems"));
+        assertTrue("路径要点到键名: " + named, named.get(0).startsWith("$.tags:"));
+        // 阳性对照: properties 点过名而实例里没这个键 ⇒ 子 schema 不参与求值
+        assertOk("{\"type\":\"object\",\"properties\":{\"tags\":{\"uniqueItems\":true}}}", "{}");
+        assertEquals(1, countMatches(errorsOf("{\"type\":\"object\",\"properties\":{\"tags\":{\"uniqueItems\":true}},"
+                + "\"required\":[\"tags\"]}", "{}"), "required"));
+        // 真线上形状: pydantic 把 Optional[set[str]] 包成 anyOf, 把 set[tuple[int,int]] 的元组
+        // 约束塞进 items —— 两格都是从 ref52_py_wire.log 的字节里抄的, 不是设想的组合.
+        // anyOf 只在没有一支合上时给一条"哪支都不合"的判定, 分支内部的明细不外溢 —— 这一条是 #48
+        // 定的立场, **不是**照抄参照: 实测两家在这一点上不同形, jsonschema 两方言各回一条
+        // ("[1, 1] is not valid under any of the given schemas"), ajv 两方言把子因铺开成三条
+        // (duplicate items | must be string | must match a schema in anyOf).
+        // 这一格要有牙只能**做差**: 同一实例、同一支数, 只把 uniqueItems 摘掉 ⇒ 必须从红变过.
+        String optionalSet = "{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"string\"},"
+                + "\"uniqueItems\":true},{\"type\":\"null\"}]}";
+        String optionalList = "{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"
+                + "{\"type\":\"null\"}]}";
+        assertFalse("anyOf 里那一支的 uniqueItems 没生效", errorsOf(optionalSet, "[\"a\",\"a\"]").isEmpty());
+        assertOk(optionalList, "[\"a\",\"a\"]");
+        assertOk(optionalSet, "null");
+        assertOk(optionalSet, "[\"a\",\"b\"]");
+        assertEquals(1, countMatches(errorsOf("{\"type\":\"array\",\"uniqueItems\":true,"
+                + "\"items\":{\"type\":\"array\",\"minItems\":2,\"maxItems\":2}}", "[[1,1],[1,1]]"), "uniqueItems"));
+        assertEquals(1, countMatches(errorsOf("{\"$ref\":\"#/$defs/U\","
+                + "\"$defs\":{\"U\":{\"uniqueItems\":true}}}", "[1,1]"), "uniqueItems"));
+        // 元组那几支在 checkArray 里是**提前 return** 的, 所以这一格钉的是"互异排在那几支之前".
+        // prefixItems 这一路按 #49 定的立场不分方言 (参照在 2020-12 那侧同判红).
+        assertEquals(1, countMatches(errorsOf("{\"type\":\"array\",\"items\":[{\"uniqueItems\":true}]}",
+                "[[1,1]]"), "uniqueItems"));
+        assertEquals(1, countMatches(errorsOf("{\"type\":\"array\",\"prefixItems\":[{\"uniqueItems\":true}]}",
+                "[[1,1]]"), "uniqueItems"));
+        // 上面两格把 uniqueItems 放在**位置子 schema** 里, 走的是 walk() 到元素的那条路, 碰不到
+        // 外层那两条 return —— 真正钉"排在提前 return 之前"的是下面这两格: uniqueItems 与数组形式
+        // items / prefixItems 是同一份 schema 上的**同级**关键字, 谁也不该吞谁.
+        // 参照读数 (53 格表, ref52_crossdiff.py 现算): prefixItems 那格四份同判重复; array-form 那格
+        // 在 draft-07 两家都判重复, 而 2020-12 那两家一份拒一份崩 (ajv THREW `items value must be
+        // ["object","boolean"]` / jsonschema RAISED AttributeError) —— 那是方言差不是实现差,
+        // 按 #49 "认得就管"的立场取重复.
+        assertEquals(1, countMatches(errorsOf("{\"type\":\"array\",\"uniqueItems\":true,"
+                + "\"items\":[{\"type\":\"array\"}]}", "[[1],[1]]"), "uniqueItems"));
+        assertEquals(1, countMatches(errorsOf("{\"type\":\"array\",\"uniqueItems\":true,"
+                + "\"prefixItems\":[{\"type\":\"array\"}]}", "[[1],[1]]"), "uniqueItems"));
+        assertEquals(1, countMatches(errorsOf("{\"type\":\"object\",\"additionalProperties\":{\"uniqueItems\":true}}",
+                "{\"k\":[1,1]}"), "uniqueItems"));
+        // not 里 [1,2] 合上互异 ⇒ not 违 (四份参照同判红)
+        assertEquals(1, countMatches(errorsOf("{\"not\":{\"uniqueItems\":true}}", "[1,2]"),
+                "not allowed by the not subschema"));
+    }
+
+    @Test
+    public void a_uniqueItems_value_that_is_not_a_boolean_does_not_participate() throws Exception {
+        // 与上面 a_bound_that_is_not_a_number_does_not_participate 同一条 house rule, 但这一族的
+        // 参照分叉更难看: 三格里 ajv 全部在 compile 阶段抛 `uniqueItems value must be ["boolean"]`
+        // (拒绝整份 schema), jsonschema 一律按 **Python 真值** 决定它参与 —— 于是连
+        // {"uniqueItems":"false"} 这种"明说不要求互异"的写法在 jsonschema 那里都变成要求互异
+        // (ref52_crossdiff.py 现算: 共有 106 格里唯一分叉的就是这三格, 且两对方言上分叉一致).
+        // 两家这里给不出同一种东西, 所以既不照 ajv 的"整份 schema 拒", 也不照 jsonschema 的"真值":
+        String u1 = "{\"uniqueItems\":1}";
+        assertOk(u1, "[1,1]");
+        assertOk("{\"uniqueItems\":\"true\"}", "[1,1]");
+        assertOk("{\"uniqueItems\":\"false\"}", "[1,1]");
+        // "不参与"只针对那格错类型的值, 不是关掉整条的借口: 同一条 schema 换成布尔写法就要红.
+        assertEquals(0, countMatches(errorsOf("{\"uniqueItems\":1,\"type\":\"array\"}", "[1,1]"), "uniqueItems"));
+        assertEquals(1, countMatches(errorsOf("{\"uniqueItems\":true,\"type\":\"array\"}", "[1,1]"), "uniqueItems"));
+        assertEquals(0, countMatches(errorsOf("{\"uniqueItems\":\"false\"}", "[1,1]"), "uniqueItems"));
+        // 布尔 false 明说不约束 (两家同档, 无分叉)
+        assertOk("{\"uniqueItems\":false}", "[1,1]");
+        // 非数组实例上这条不参与: 参照四份都判 VALID, 而不是"这个值不是数组所以违规".
+        // 下面三格一一有格名对着 (53 格表的 ignores object instance / ignores string instance /
+        // ignores null instance) —— null 那一格是这轮**后补**的: 写这句话时共有表里只有前两种形状,
+        // 第三种没有读数就不该跟着这句话一起结算.
+        assertOk("{\"uniqueItems\":true}", "{\"a\":1}");
+        assertOk("{\"uniqueItems\":true}", "\"aa\"");
+        assertOk("{\"uniqueItems\":true}", "null");
     }
 }

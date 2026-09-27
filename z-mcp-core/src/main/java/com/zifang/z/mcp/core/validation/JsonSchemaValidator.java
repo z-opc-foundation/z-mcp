@@ -18,9 +18,23 @@ import java.util.regex.PatternSyntaxException;
  * <p>覆盖 MCP 工具 schema 实际会用到的关键字: type / required / properties /
  * items (单份 schema、布尔、**数组形式**三种) / prefixItems / additionalItems /
  * enum / const / additionalProperties / minimum / maximum / exclusiveMinimum /
- * exclusiveMaximum / multipleOf / minLength / maxLength /
+ * exclusiveMaximum / multipleOf / uniqueItems / minLength / maxLength /
  * pattern / minItems / maxItems / nullable, 外加 refs 与组合子: $ref / $defs /
  * definitions / allOf / anyOf / oneOf / not.
+ *
+ * <p>数组的"元素互异"这一族原本是整条躺在"未知关键字不作约束"里: 广告「tags 只能是互异的
+ * 一组值」的参数, 传 ["a","a"] 照过. 这一族同样是真生产者交上来的形状 —— python SDK 1.27.1 +
+ * pydantic 2.12.5 的 set[str] / set[int] / frozenset[str] / set[tuple[int,int]] /
+ * Optional[set[str]] 在真 list_tools() 的 inputSchema 里一律带 "uniqueItems": true
+ * (ref52_py_wire.py → .log, UNIQUE_ITEMS_ON_WIRE=5 正是这五处, 同页对照 list[int] 不带).
+ * TS 那侧是反的: zod 4.6.5 认为 set 不可在 JSON Schema 里表示 (ref52_zod_wire.log 的
+ * STRICT_MODE 行抛 "Set cannot be represented in JSON Schema", 带 unrepresentable:'any' 时
+ * 退化成 {} 即无任何约束) ⇒ UNIQUE_ON_WIRE_TS=0,
+ * 所以这一族今天只从 python 生产者与手写 schema 的服务端上来.
+ * 判据的两份参照 × 双方言读数在 tsclient/ref52_unique_oracle.js 与 ref52_unique_oracle.py
+ * (各 53 格同名), 逐格对拍由 ref52_crossdiff.py 现算: 跨实现、同方言的 106 格里只有 uniqueItems
+ * 配了非布尔值那一族 (3 格) 分叉 —— ajv 在编译期抛, jsonschema 按 Python 真值决定它参与.
+ * 立场 (两家都不照抄) 写在 checkArray 的注释里.
  *
  * <p>数值那一族原本只有含等号的半条 (minimum / maximum), 不含等号的那一头与步长一起躺在
  * "未知关键字不作约束"里 ⇒ 广告「必须 &gt; 0」的参数, 传 0 照过; 广告「只能是 5 的倍数」的传 11 照过.
@@ -356,6 +370,26 @@ public class JsonSchemaValidator {
         if (maxItems != null && maxItems.isInt() && node.size() > maxItems.asInt()) {
             errors.add(path + ": expected at most " + maxItems.asInt() + " items");
         }
+        JsonNode uniqueItems = schema.get("uniqueItems");
+        // 放在 items / prefixItems 那几支的 return **之前**: 互异与位置约束无关。"位置子 schema 里
+        // 也有互异"那两格 (ref52 两份日志的 inside items schema / over tuple-shaped items) 四份参照
+        // 同判重复; 数组形式 items 本身当位置用的那一格 (inside tuple items array) 只有 draft-07 那
+        // 两家判重复, 2020-12 那两家一份崩一份拒 (jsonschema RAISED / ajv THREW) —— 那是方言差不是
+        // 实现差, 按 #49 定的"认得就管"照 draft-07 那侧办。
+        //
+        // 只有布尔 true 起约束。值不配当布尔时两家参照互相矛盾, 而且各错一半 ——
+        // ajv 编译期抛 `uniqueItems value must be ["boolean"]` (整份 schema 被拒), jsonschema 按
+        // Python 真值让它参与 (于是 {"uniqueItems":"false"} 那种明显不想要约束的写法反而要求互异).
+        // 这三格是 #52 里唯一"跨实现、同方言"分叉的一族 (ref52_crossdiff.py 现算: 共有 106 格里
+        // 只有这 3 格分叉), 没有可照抄的一致读数, 所以沿用 #51 在同一类问题上定的政策:
+        // 值不配当这个关键字的类型 ⇒ 不参与, 既不抛也不当真值.
+        if (uniqueItems != null && uniqueItems.isBoolean() && uniqueItems.asBoolean()) {
+            int[] dup = firstDuplicate(node);
+            if (dup != null) {
+                errors.add(path + ": items ## " + dup[0] + " and " + dup[1]
+                        + " are identical but uniqueItems is true");
+            }
+        }
         JsonNode items = schema.get("items");
         JsonNode prefix = schema.get("prefixItems");
         JsonNode additional = schema.get("additionalItems");
@@ -498,20 +532,75 @@ public class JsonSchemaValidator {
     }
 
     /**
-     * JSON 意义上的相等, enum 与 const 共用 (规范里 const 就是"单值 enum").
+     * JSON 意义上的相等, enum / const / uniqueItems 三处共用 (规范里 const 就是"单值 enum").
      *
-     * <p>对象比键值集合因而与书写顺序无关、数组按次序比、字符串不比 Java 引用: 这些都是
-     * {@link JsonNode#equals} 给的. 额外补一条数字闸是因为 Jackson 并不跨数字类型比相等 ——
-     * 实测 jackson-databind 2.13.5 / 2.15.4 / 2.18.9 三版上
-     * {@code IntNode(1).equals(DoubleNode(1.0))} 都是 false (~/.cache/zmcp_prey/ref50_jackson_probe.log),
-     * 而 JSON 里它们是同一个数值; 两份参照校验器都判同值 (ref50 两份日志的
-     * "const int vs int-valued float" / "const float vs int-valued float" 两格).
+     * <p>对象比键值集合因而与书写顺序无关、数组按次序比、字符串不比 Java 引用: 这些是同类型下的
+     * {@link JsonNode#equals} 给的. 跨数字类型与**嵌套**那两层它都不给, 所以自己走:
+     * {@code IntNode(1).equals(DoubleNode(1.0))} 在顶层是 false (实测 jackson-databind
+     * 2.13.5 / 2.15.4 / 2.18.9 三版一致, ref50_jackson_probe.log), {@code [[1],[1.0]]} 与
+     * {@code [{"a":1},{"a":1.0}]} 在嵌套层也是 false (同三版, ref52_jackson_nested.log),
+     * 而 JSON 里它们都是同一个数值 —— 两份参照校验器每一格都判"同一个值"
+     * (ref50 两份日志的 "const int vs int-valued float"、ref52 两份日志的
+     * "nested int vs float in array" / "numeric in object leaf").
      */
     private static boolean jsonEquals(JsonNode a, JsonNode b) {
         if (a == null || b == null) return false;
         if (a.equals(b)) return true;
-        return a.isNumber() && b.isNumber()
-                && Double.compare(a.asDouble(), b.asDouble()) == 0;
+        if (a.isNumber() && b.isNumber()) return sameNumber(a, b);
+        // Jackson 的 equals 是"逐节点按类型比"的, 嵌套一层就不再认数值相等 —— 实测
+        // (~/.cache/zmcp_prey/ref52_jackson_nested.log, databind 2.13.5 / 2.15.4 / 2.18.9 三版一致)
+        // [[1],[1.0]] 与 [{"a":1},{"a":1.0}] 都是 equals=false, 而四份参照校验器都判这两格"重复"
+        // (ref52 两份日志的 "nested int vs float in array" / "numeric in object leaf").
+        // 所以这里自己走下去.
+        if (a.isArray() && b.isArray()) {
+            if (a.size() != b.size()) return false;
+            for (int i = 0; i < a.size(); i++) {
+                if (!jsonEquals(a.get(i), b.get(i))) return false;
+            }
+            return true;
+        }
+        if (a.isObject() && b.isObject()) {
+            if (a.size() != b.size()) return false;
+            for (Iterator<String> it = a.fieldNames(); it.hasNext();) {
+                String field = it.next();
+                // b 少这个字段时 get 返回 null, jsonEquals(.., null) 在上面那行就是 false.
+                // 键序不参与 (Jackson 的 equals 本来也不看序, 实测 "key order swapped" 那格是 true).
+                if (!jsonEquals(a.get(field), b.get(field))) return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /** 溢出成 Infinity 的 double 没有 BigDecimal 表示 (decimalValue() 抛 NumberFormatException,
+     *  三版 databind 同读数, ref52_bignum_java.log), 而 {"tags": [1e1000, 5]} 这样的请求体真能到这儿
+     *  —— 那一条退回按 double 比, 两家参照在 IEEE double 上与我们同一条路 (四份都把这两个饱和成 inf
+     *  并判重复, 见两份 oracle 日志的 `uniqueItems both overflow to infinity` 四行). */
+    private static boolean sameNumber(JsonNode a, JsonNode b) {
+        try {
+            return a.decimalValue().compareTo(b.decimalValue()) == 0;
+        } catch (NumberFormatException e) {
+            return a.asDouble() == b.asDouble();
+        }
+    }
+
+    /**
+     * 第一对重复元素的下标; 没有重复则 null.
+     *
+     * <p>只给一条判定是量出来的, 不是推的: 新增那一格 {@code [1,1,2,2,3,3]} (三对重复) 在四份参照
+     * 里都只回一条消息 —— ajv 两方言 "must NOT have duplicate items (items ## 4 and 5 are
+     * identical)", jsonschema 两方言 "[1, 1, 2, 2, 3, 3] has non-unique elements"
+     * (ref52 两份日志的 three duplicate pairs 四行). 至于报**哪**一对两家自己不一致 (单对那格 ajv
+     * 报 0 and 1, 三对那格报 4 and 5; jsonschema 干脆不给下标), 所以这里取"第一对"是一个选择,
+     * 依据只有那条: 逐对铺开会比参照多红, 而参照的判定数才是被钉住的那一半。
+     */
+    private static int[] firstDuplicate(JsonNode array) {
+        for (int i = 0; i < array.size(); i++) {
+            for (int j = i + 1; j < array.size(); j++) {
+                if (jsonEquals(array.get(i), array.get(j))) return new int[] {i, j};
+            }
+        }
+        return null;
     }
 
     private static boolean matchesType(String expected, JsonNode node) {
