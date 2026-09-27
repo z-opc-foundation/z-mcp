@@ -16,7 +16,8 @@ import java.util.regex.PatternSyntaxException;
  * JSON Schema 子集校验器 — 协议要求服务端 MUST 校验工具入参.
  *
  * <p>覆盖 MCP 工具 schema 实际会用到的关键字: type / required / properties /
- * items / enum / additionalProperties / minimum / maximum / minLength / maxLength /
+ * items (单份 schema、布尔、**数组形式**三种) / prefixItems / additionalItems /
+ * enum / additionalProperties / minimum / maximum / minLength / maxLength /
  * pattern / minItems / maxItems / nullable, 外加 refs 与组合子: $ref / $defs /
  * definitions / allOf / anyOf / oneOf / not.
  *
@@ -49,12 +50,8 @@ public class JsonSchemaValidator {
         // 没有 schema (上游压根没声明) 与"声明了一个不配当 schema 的东西"是两回事:
         // 前者不作约束, 后者按"认得就必须给确定结论"的政策一律红 —— ajv 在这一步是直接抛
         // ("schema must be object or boolean"), jsonschema 同样拒绝 (ref48_bogus_schema_*.log).
+        // 这一条不再在这里重复判: walk() 顶层与嵌套同用一枚闸.
         if (schema == null || schema.isNull()) return errors;
-        if (!schema.isObject() && !schema.isBoolean()) {
-            errors.add("$: a schema must be an object or a boolean but is "
-                    + jsonType(schema) + " " + literal(schema) + ", refusing to treat it as no constraint");
-            return errors;
-        }
         walk(schema, instance, "$", new Ctx(schema), errors);
         return errors;
     }
@@ -78,6 +75,16 @@ public class JsonSchemaValidator {
     }
 
     private void walk(JsonNode schema, JsonNode node, String path, Ctx ctx, List<String> errors) {
+        // 一份 schema 只能是对象或布尔, 顶层与**任何一层**都同这一条闸: 嵌套位置原先没人管,
+        // 于是 {"items":["nope"]} 这种"该是 schema 的地方长了别的东西"会一路走到元素检查里
+        // 什么关键字都取不到 ⇒ 静默放行. 四份参照在这格上互不一致 (ref49_tuple_oracle.log 与
+        // ref49_tuple_oracle_py.log: 两份 draft-07 参照 VALID, ajv-2020 编译期抛,
+        // jsonschema-2020 直接 AttributeError 崩) ⇒ 没有"照抄参照"这条路, 按政策 fail closed.
+        if (!schema.isBoolean() && !schema.isObject()) {
+            errors.add(path + ": a schema must be an object or a boolean but is "
+                    + jsonType(schema) + " " + literal(schema) + ", refusing to treat it as no constraint");
+            return;
+        }
         // 布尔 schema 是最小的那一种约束: true 恒过, false 恒不过.
         // 两份参照校验器都认它 (ref48_bool_schema.log: #/definitions/X 这种非标准容器
         // 也照样按 JSON Pointer 解出来 —— 指针解析与关键字叫什么无关).
@@ -327,14 +334,72 @@ public class JsonSchemaValidator {
             errors.add(path + ": expected at most " + maxItems.asInt() + " items");
         }
         JsonNode items = schema.get("items");
+        JsonNode prefix = schema.get("prefixItems");
+        JsonNode additional = schema.get("additionalItems");
+
+        if (prefix != null && !prefix.isNull()) {
+            // 2020-12 的元组写法: 位置约束住在 prefixItems 里, 尾巴归 items.
+            // prefixItems 不是数组时两份 2020-12 参照一个抛一个崩, 两份 draft-07 参照看不见它而放行
+            // ⇒ 没有可照抄的读数, 按政策给确定结论 (ref49_tuple_oracle.log / _py.log 的 policy 行).
+            if (!prefix.isArray()) {
+                errors.add(path + ": prefixItems must be an array of schemas but is "
+                        + jsonType(prefix) + " " + literal(prefix) + ", refusing to guess");
+                return;
+            }
+            if (items != null && items.isArray()) {
+                // 两种元组写法同时出现时它们互相矛盾 (谁管尾巴都不成立), 参照之间也各说各话.
+                errors.add(path + ": prefixItems and an array-form items are both present,"
+                        + " refusing to guess which tuple spelling governs");
+                return;
+            }
+            checkPositions(prefix, node, path, ctx, errors);
+            // 四份参照对 "prefixItems + additionalItems" 一律 VALID: 尾巴只由 items 管.
+            checkTail(items, node, path, prefix.size(), ctx, errors, "items");
+            return;
+        }
+        if (items != null && items.isArray()) {
+            // draft-07 的元组写法, 也是**真客户端实际交来的那一种**: 官方 TS SDK 自己的校验器
+            // 是裸 draft-07 ajv (node_modules/@modelcontextprotocol/sdk/dist/cjs/
+            // validation/ajv-provider.js: new Ajv({strict:false, validateFormats:true,
+            // validateSchema:false, allErrors:true})), 而 zod 4 的 z.tuple() 在两种 target 下交的
+            // 都是 {"items":[...],"additionalItems":false,"minItems":n,"maxItems":n}
+            // (ref48_zod_probe.log 的 tuple 两行) —— 连 target 选 2020-12 时也是这一种, 而那一种
+            // 字节在真 2020-12 校验器里编译不过. 所以这里不按方言分派, 认得就管.
+            checkPositions(items, node, path, ctx, errors);
+            checkTail(additional, node, path, items.size(), ctx, errors, "additionalItems");
+            return;
+        }
         if (items != null && !items.isNull()) {
-            // items 也可以是一份布尔 schema —— 布尔子 schema 两份参照都认 (ref48_bool_schema.log
-            // 量了顶层、properties 里、$ref 指进去三个位置), 所以这里不特殊处理, 交给 walk()
-            // 的布尔分支. 而 zod 4 的 tuple 实测交的是**数组**形式 items + additionalItems:false
-            // (ref48_zod_probe.log), 那一种不认, 见 README「已知边界」.
+            // 一份 schema 管所有元素. 布尔子 schema 两份参照都认 (ref48_bool_schema.log
+            // 量了顶层、properties 里、$ref 指进去三个位置), 所以交给 walk() 的布尔分支.
+            // 此时并行的 additionalItems 不作约束 —— 四份参照对 "items 是单份 schema 而另有
+            // additionalItems" 全部判 VALID (ref49 两份日志最后一条 policy 格).
             for (int i = 0; i < node.size(); i++) {
                 walk(items, node.get(i), path + "[" + i + "]", ctx, errors);
             }
+        }
+    }
+
+    /** 元组前 N 格各自过一份子 schema; 实例短于 N 就只比已有的那些. */
+    private void checkPositions(JsonNode positional, JsonNode node, String path, Ctx ctx,
+                                List<String> errors) {
+        int n = Math.min(node.size(), positional.size());
+        for (int i = 0; i < n; i++) {
+            walk(positional.get(i), node.get(i), path + "[" + i + "]", ctx, errors);
+        }
+    }
+
+    /** 元组尾巴: 第 from 个之后的元素过一遍 tail; `false` 就等于"不许有尾巴". */
+    private void checkTail(JsonNode tail, JsonNode node, String path, int from, Ctx ctx,
+                           List<String> errors, String keyword) {
+        if (tail == null || tail.isNull()) return;
+        if (!tail.isBoolean() && !tail.isObject()) {
+            errors.add(path + ": " + keyword + " must be an object or a boolean but is "
+                    + jsonType(tail) + " " + literal(tail) + ", refusing to treat it as no constraint");
+            return;
+        }
+        for (int i = from; i < node.size(); i++) {
+            walk(tail, node.get(i), path + "[" + i + "]", ctx, errors);
         }
     }
 

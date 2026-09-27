@@ -384,6 +384,116 @@ public class JsonSchemaValidatorTest {
     }
 
     @Test
+    public void a_draft07_tuple_from_a_real_client_checks_every_element() throws Exception {
+        // zod 4 的 z.tuple([z.string(), z.number()]) 交出来的就是下面这一段字节
+        // (~/.cache/zmcp_prey/tsclient/ref48_zod_probe.log 的 tuple 两行 —— draft-07 与
+        //  "draft 2020-12" 两种 target 下**同形**, 都是数组 items + additionalItems:false).
+        // 官方 TS SDK 自己用的校验器是裸 draft-07 ajv
+        // (node_modules/@modelcontextprotocol/sdk/dist/cjs/validation/ajv-provider.js:
+        //  new Ajv({strict:false, validateFormats:true, validateSchema:false, allErrors:true})),
+        // 它对这段字节的读数与 jsonschema 的 Draft7 逐格相同 (ref49_tuple_oracle.log / _py.log),
+        // 而我们在此之前一格都不管 —— 元组的"第 i 个元素是什么类型"没人兜, 只兜住了长度.
+        String t = "{\"type\":\"array\",\"items\":[{\"type\":\"string\"},{\"type\":\"number\"}],"
+                + "\"additionalItems\":false,\"minItems\":2,\"maxItems\":2}";
+        assertOk(t, "[\"a\",1]");
+        List<String> wrong = errorsOf(t, "[\"a\",\"b\"]");
+        assertFalse("第 2 个元素的类型没管住: " + wrong, wrong.isEmpty());
+        assertTrue("要报在出问题那一格上: " + wrong, wrong.get(0).startsWith("$[1]:"));
+        assertFalse("元组长度超了该红: ", errorsOf(t, "[\"a\",1,2]").isEmpty());
+        // 单独判"是 additionalItems 在管尾巴"而不是 maxItems: 去掉长度那半条, 参照读数是
+        // "07 additionalItems:false rejects extra" (ajv: must NOT have more than 2 items)
+        List<String> longTail = errorsOf("{\"type\":\"array\",\"items\":[{\"type\":\"string\"},"
+                + "{\"type\":\"number\"}],\"additionalItems\":false}", "[\"a\",1,2]");
+        assertFalse("additionalItems:false 没拦住尾巴: " + longTail, longTail.isEmpty());
+        assertTrue("尾巴要报在第 3 格上: " + longTail, longTail.get(0).startsWith("$[2]:"));
+
+        // 阳性对照, 防的是"顺手管过头": 没有 additionalItems 时尾巴敞开、实例可以短于位置表,
+        // 这两格两份 draft-07 参照都判 VALID ("07 items shorter ok" / "07 extra allowed by default")
+        String open = "{\"type\":\"array\",\"items\":[{\"type\":\"string\"},{\"type\":\"number\"}]}";
+        assertOk(open, "[\"a\"]");
+        assertOk(open, "[\"a\",1,\"什么都能有\"]");
+
+        // 尾巴也可以是**一份 schema** (ajv: /2 must be boolean; jsonschema: [2] 'x' is not of type)
+        String tail = "{\"type\":\"array\",\"items\":[{\"type\":\"string\"}],"
+                + "\"additionalItems\":{\"type\":\"boolean\"}}";
+        assertOk(tail, "[\"a\",true,false]");
+        assertFalse("尾巴那份 schema 没生效: " + errorsOf(tail, "[\"a\",1]"),
+                errorsOf(tail, "[\"a\",1]").isEmpty());
+        // 空位置表 + 关死尾巴 = 一个元素都不许有 (两份参照: "must NOT have more than 0 items")
+        assertOk("{\"type\":\"array\",\"items\":[],\"additionalItems\":false}", "[]");
+        assertFalse(errorsOf("{\"type\":\"array\",\"items\":[],\"additionalItems\":false}", "[1]").isEmpty());
+    }
+
+    @Test
+    public void the_2020_12_prefixItems_spelling_gets_the_same_treatment() throws Exception {
+        String p = "{\"type\":\"array\",\"prefixItems\":[{\"type\":\"string\"},{\"type\":\"number\"}]}";
+        assertOk(p, "[\"a\",1]");
+        List<String> wrong = errorsOf(p, "[\"a\",\"b\"]");
+        assertFalse("prefixItems 的位置类型没管住: " + wrong, wrong.isEmpty());
+        assertTrue("要报在出问题那一格上: " + wrong, wrong.get(0).startsWith("$[1]:"));
+        // 短实例与敞开尾巴: 四份参照全判 VALID (ref49 两份日志的 "2020 prefixItems shorter/extra" 格)
+        assertOk(p, "[\"a\"]");
+        assertOk(p, "[\"a\",1,true]");
+
+        // 2020-12 的尾巴归 items 而不是 additionalItems (ajv: must NOT have more than 2 items;
+        // jsonschema: Expected at most 2 items but found 1 extra)
+        String closed = "{\"type\":\"array\",\"prefixItems\":[{\"type\":\"string\"},"
+                + "{\"type\":\"number\"}],\"items\":false}";
+        assertOk(closed, "[\"a\",1]");
+        List<String> extra = errorsOf(closed, "[\"a\",1,true]");
+        assertFalse("items:false 没拦住 2020-12 的尾巴: " + extra, extra.isEmpty());
+        assertTrue("要报在第 3 格上: " + extra, extra.get(0).startsWith("$[2]:"));
+        String tailSchema = "{\"type\":\"array\",\"prefixItems\":[{\"type\":\"string\"}],"
+                + "\"items\":{\"type\":\"boolean\"}}";
+        assertOk(tailSchema, "[\"a\",true]");
+        assertFalse("尾巴那份 schema 没生效: " + errorsOf(tailSchema, "[\"a\",1]"),
+                errorsOf(tailSchema, "[\"a\",1]").isEmpty());
+
+        // 位置项是布尔 schema 照判 (两份 2020-12 参照: "boolean schema is false" / "False schema does not allow 1")
+        assertOk("{\"type\":\"array\",\"prefixItems\":[false]}", "[]");
+        assertFalse(errorsOf("{\"type\":\"array\",\"prefixItems\":[false]}", "[1]").isEmpty());
+        // 深一层的真实路径 (ajv: /0/1 must be string; jsonschema: [0, 1])
+        List<String> deep = errorsOf("{\"type\":\"array\",\"prefixItems\":[{\"type\":\"array\","
+                + "\"items\":{\"type\":\"string\"}}]}", "[[\"x\",1]]");
+        assertFalse("嵌套元组里层的元素没管住: " + deep, deep.isEmpty());
+        assertTrue("要报在 $[0][1] 上: " + deep, deep.get(0).startsWith("$[0][1]:"));
+        // 阳性对照: prefixItems 旁边挂 additionalItems **不作约束** (四份参照全判 VALID)
+        assertOk("{\"type\":\"array\",\"prefixItems\":[{\"type\":\"string\"}],"
+                + "\"additionalItems\":false}", "[\"a\",1,2]");
+    }
+
+    @Test
+    public void a_nested_value_that_is_not_a_schema_gets_a_verdict_not_silence() throws Exception {
+        // 这几格**没有可照抄的参照**: 该放子 schema 的地方放了别的东西时, ajv 两种方言都判
+        // VALID (SDK 那侧关了 validateSchema), jsonschema 两种方言都直接 AttributeError 崩掉
+        // (ref49_tuple_oracle.log / ref49_tuple_oracle_py.log 的 bogus / policy 行).
+        // 所以按顶层那一条政策办: 认得的位置必须给确定结论, 不能退成"这里没约束".
+        List<String> inItems = errorsOf("{\"type\":\"array\",\"items\":[\"nope\"]}", "[\"a\"]");
+        assertFalse("位置项不配当 schema 却静默放行: " + inItems, inItems.isEmpty());
+        assertTrue("要说清为什么不判: " + inItems, inItems.get(0).contains("must be an object or a boolean"));
+        List<String> inProps = errorsOf("{\"type\":\"object\",\"properties\":{\"a\":\"nope\"}}", "{\"a\":1}");
+        assertFalse("properties 里不配当 schema 却静默放行: " + inProps, inProps.isEmpty());
+        assertTrue("要报在那一个键上: " + inProps, inProps.get(0).startsWith("$.a:"));
+        List<String> badRef = errorsOf("{\"type\":\"object\",\"properties\":{\"a\":{\"$ref\":\"#/$defs/X\"}},"
+                + "\"$defs\":{\"X\":\"nope\"}}", "{\"a\":1}");
+        assertFalse("$ref 落在非 schema 上却静默放行: " + badRef, badRef.isEmpty());
+        assertTrue("要报在 ref 那一个位置: " + badRef, badRef.get(0).startsWith("$.a:"));
+
+        // prefixItems 自己不是一份位置表 / 两种元组写法互相矛盾 / 尾巴关键字不是 schema —— 都要报出来
+        List<String> badPrefix = errorsOf("{\"type\":\"array\",\"prefixItems\":{\"type\":\"string\"}}", "[\"a\"]");
+        assertFalse("prefixItems 不是数组却静默放行: " + badPrefix, badPrefix.isEmpty());
+        assertTrue("要点名 prefixItems: " + badPrefix, badPrefix.get(0).contains("prefixItems"));
+        List<String> both = errorsOf("{\"type\":\"array\",\"items\":[{\"type\":\"string\"}],"
+                + "\"prefixItems\":[{\"type\":\"number\"}]}", "[\"a\"]");
+        assertFalse("两种元组写法打架却随便挑一边: " + both, both.isEmpty());
+        assertTrue("要说清是哪两种写法: " + both, both.get(0).contains("prefixItems"));
+        List<String> badTail = errorsOf("{\"type\":\"array\",\"items\":[{\"type\":\"string\"}],"
+                + "\"additionalItems\":5}", "[\"a\",1]");
+        assertFalse("尾巴关键字不配当 schema 却静默放行: " + badTail, badTail.isEmpty());
+        assertTrue("要点名是哪个关键字: " + badTail, badTail.get(0).contains("additionalItems"));
+    }
+
+    @Test
     public void additional_properties_as_a_schema_constrains_map_values() throws Exception {
         // pydantic 的 `Dict[str, int]` 实测形状 (~/.cache/zmcp_prey/ref48_dict_probe.py):
         // 约束不住在 properties 里, 住在 additionalProperties 这份 **schema** 里.
