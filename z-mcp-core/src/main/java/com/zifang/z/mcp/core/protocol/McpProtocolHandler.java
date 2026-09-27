@@ -2,6 +2,7 @@ package com.zifang.z.mcp.core.protocol;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.zifang.z.mcp.api.dto.CallToolResult;
 import com.zifang.z.mcp.api.dto.ContentBlock;
@@ -19,6 +20,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -340,23 +342,102 @@ public class McpProtocolHandler {
     }
 
     private JsonNode parseSchema(String json, String toolName, String which) {
+        JsonNode node;
         try {
-            JsonNode node = mapper.readTree(json);
-            if (node == null || node.isNull() || node.isMissingNode() || !node.isObject()) {
-                ObjectNode fallback = mapper.createObjectNode();
-                fallback.put("type", "object");
-                fallback.set("properties", mapper.createObjectNode());
-                return fallback;
-            }
-            return node;
+            node = mapper.readTree(json);
         } catch (Exception e) {
             log.warn("tool {} has unparsable {}: {} — emitting permissive object schema",
-                    toolName, which, e.getMessage());
-            ObjectNode fallback = mapper.createObjectNode();
-            fallback.put("type", "object");
-            fallback.set("properties", mapper.createObjectNode());
-            return fallback;
+                    toolName, which, describe(e));
+            return permissiveSchema();
         }
+        if (node == null || node.isNull() || node.isMissingNode() || !node.isObject()) {
+            log.warn("tool {} has {} that is not a JSON object ({}) — emitting permissive object schema",
+                    toolName, which, node == null ? "absent" : String.valueOf(node.getNodeType()));
+            return permissiveSchema();
+        }
+        return toMcpSchemaShape((ObjectNode) node, toolName, which);
+    }
+
+    private ObjectNode permissiveSchema() {
+        ObjectNode fallback = mapper.createObjectNode();
+        fallback.put("type", "object");
+        fallback.set("properties", mapper.createObjectNode());
+        return fallback;
+    }
+
+    /**
+     * 把广告出去的 schema 折进 MCP 规定的形状 —— 只削弱, 不加强.
+     *
+     * <p>2025-06-18 的 {@code schema.json} 对 {@code inputSchema} 与 {@code outputSchema}
+     * 两个槽都写死 {@code "type": {"const":"object"}} 且 {@code required:["type"]},
+     * {@code properties} 的每个值必须是对象, {@code required} 必须是字符串数组.
+     *
+     * <p>不合形的后果不是"某个客户端少看一条约束": 官方 TS sdk 1.30.1 的客户端把整个
+     * {@code tools/list} 的结果过一次 {@code ListToolsResultSchema}
+     * ({@code shared/protocol.js:696}), 一个字段不合形 ⇒ 同一张目录里<b>别的</b>工具一起消失.
+     * 实测 18 格里 6 格这么毒化整张目录(python 1.27.1 一格都不拒, 所以地板是 zod 那一侧).
+     *
+     * <p>未知关键字与 {@code $ref}/{@code $defs} 原样放过: 两家客户端都收, 规范那两个槽也没锁死
+     * {@code additionalProperties}, 抹掉它们才是替上游做决定.
+     */
+    private JsonNode toMcpSchemaShape(ObjectNode schema, String toolName, String which) {
+        JsonNode type = schema.get("type");
+        if (type == null || type.isMissingNode() || type.isNull()) {
+            // 补 "object" 不加强约束: 这个槽的语义本来就是"某个对象的形状".
+            schema.put("type", "object");
+            log.warn("tool {} declares {} without a root type; filling in \"object\" as the MCP schema demands",
+                    toolName, which);
+        } else if (!type.isTextual() || !"object".equals(type.asText())) {
+            log.warn("tool {} declares {} with root type {} — MCP pins this slot to \"object\"; "
+                    + "emitting permissive object schema", toolName, which, type.asText());
+            return permissiveSchema();
+        }
+
+        JsonNode props = schema.get("properties");
+        if (props != null) {
+            if (!props.isObject()) {
+                schema.remove("properties");
+                log.warn("tool {}'s {}.properties is {} rather than an object; dropping the slot",
+                        toolName, which, String.valueOf(props.getNodeType()));
+            } else {
+                ObjectNode obj = (ObjectNode) props;
+                int widened = 0;
+                Iterator<String> fields = obj.fieldNames();
+                while (fields.hasNext()) {
+                    String field = fields.next();
+                    JsonNode value = obj.get(field);
+                    if (value == null || !value.isObject()) {
+                        obj.putObject(field);
+                        widened++;
+                    }
+                }
+                if (widened > 0) {
+                    log.warn("tool {}'s {}.properties has {} entr{} whose value is not a schema object; "
+                                    + "widened to accept anything", toolName, which, widened,
+                            widened == 1 ? "y" : "ies");
+                }
+            }
+        }
+
+        JsonNode required = schema.get("required");
+        if (required != null) {
+            if (!required.isArray()) {
+                schema.remove("required");
+                log.warn("tool {}'s {}.required is {} rather than an array; dropping the slot",
+                        toolName, which, String.valueOf(required.getNodeType()));
+            } else {
+                ArrayNode kept = mapper.createArrayNode();
+                for (JsonNode r : required) if (r.isTextual()) kept.add(r.asText());
+                if (kept.size() == 0) schema.remove("required");
+                else schema.set("required", kept);
+                if (kept.size() != required.size()) {
+                    log.warn("tool {}'s {}.required has {} non-string entr{}; dropping them",
+                            toolName, which, required.size() - kept.size(),
+                            required.size() - kept.size() == 1 ? "y" : "ies");
+                }
+            }
+        }
+        return schema;
     }
 
     private Map<String, Object> toolsCall(JsonNode params, RequestContext ctx) {

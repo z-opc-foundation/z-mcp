@@ -734,6 +734,352 @@ public class McpProtocolHandlerTest {
         assertFalse("不许改判成缺 structuredContent: " + text, text.contains("no structuredContent"));
     }
 
+    // --------------------------------------------------- #63: 广告槽位的形状(MCP schema.json 那两个槽)
+
+    @SuppressWarnings("unchecked")
+    private java.util.List<Map<String, Object>> listedTools(String id) throws Exception {
+        return (java.util.List<Map<String, Object>>) resultOf(
+                handler.handle(call("tools/list", null, id), liveSession())).get("tools");
+    }
+
+    private Map<String, Object> listedEntry(String name, String id) throws Exception {
+        for (Map<String, Object> t : listedTools(id)) if (name.equals(t.get("name"))) return t;
+        return null;
+    }
+
+    private void registerSchemaProbe(String name, String inputSchema, String outputSchema, Object returned) {
+        McpRegistry.Builder b = registry.tool(name).description("schema probe " + name)
+                .inputSchema(inputSchema);
+        if (outputSchema != null) b.outputSchema(outputSchema);
+        b.register(args -> returned);
+    }
+
+    /**
+     * 复述 spec 2025-06-18 {@code schema.json} 对 {@code inputSchema}/{@code outputSchema} 的形状要求:
+     * 根 {@code type} 必须在且恒为 "object"、{@code properties} 整槽与其中每一项都必须是对象、
+     * {@code required} 必须是字符串数组. 官方 TS 客户端的 {@code ToolSchema} 逐条同判.
+     */
+    private void assertMcpSchemaSlot(JsonNode schema, String where, List<String> wrong) {
+        if (!schema.isObject()) {
+            wrong.add(where + " 根本不是对象: " + schema);
+            return;
+        }
+        JsonNode type = schema.get("type");
+        if (type == null || !type.isTextual() || !"object".equals(type.asText())) {
+            wrong.add(where + " 的根 type 不是 \"object\": " + schema);
+        }
+        JsonNode props = schema.get("properties");
+        if (props != null) {
+            if (!props.isObject()) {
+                wrong.add(where + ".properties 整槽不是对象: " + props);
+            } else {
+                for (java.util.Iterator<String> it = props.fieldNames(); it.hasNext(); ) {
+                    String f = it.next();
+                    if (!props.get(f).isObject()) wrong.add(where + ".properties." + f + " 不是 schema 对象: " + props.get(f));
+                }
+            }
+        }
+        JsonNode req = schema.get("required");
+        if (req != null) {
+            if (!req.isArray()) {
+                wrong.add(where + ".required 不是数组: " + req);
+            } else {
+                for (JsonNode r : req) if (!r.isTextual()) wrong.add(where + ".required 含非字符串项: " + req);
+            }
+        }
+    }
+
+    @Test
+    public void a_declared_schema_without_a_root_type_is_completed_not_discarded() throws Exception {
+        registerSchemaProbe("no_root_type", "{\"type\":\"object\",\"properties\":{}}",
+                "{\"properties\":{\"r\":{\"type\":\"integer\"}},\"required\":[\"r\"]}", "ok");
+        JsonNode out = wireNode(listedEntry("no_root_type", "101").get("outputSchema"));
+        assertEquals("缺的根 type 要补成 object: " + out, "object", out.path("type").asText());
+        assertTrue("补形状不许把真约束一起丢掉: " + out, out.path("properties").path("r").path("type").isTextual());
+        assertEquals("required 原样保留: " + out, mapper.readTree("[\"r\"]"), out.path("required"));
+        List<String> wrong = new ArrayList<String>();
+        assertMcpSchemaSlot(out, "outputSchema", wrong);
+        assertEquals(wrong.toString(), 0, wrong.size());
+    }
+
+    @Test
+    public void a_schema_whose_root_type_is_something_else_is_never_advertised() throws Exception {
+        registerSchemaProbe("string_root_out", "{\"type\":\"object\",\"properties\":{}}",
+                "{\"type\":\"string\"}", "ok");
+        registerSchemaProbe("string_root_in", "{\"type\":\"string\"}", null, "ok");
+        registerSchemaProbe("well_formed_neighbour", "{\"type\":\"object\",\"properties\":{\"p\":{\"type\":\"string\"}}}",
+                "{\"type\":\"object\",\"properties\":{\"r\":{\"type\":\"integer\"}}}", "ok");
+
+        JsonNode out = wireNode(listedEntry("string_root_out", "102").get("outputSchema"));
+        JsonNode in = wireNode(listedEntry("string_root_in", "103").get("inputSchema"));
+        JsonNode permissive = mapper.readTree("{\"type\":\"object\",\"properties\":{}}");
+        assertEquals("非 object 的根型不能原样上线: " + out, permissive, out);
+        assertEquals("inputSchema 同理: " + in, permissive, in);
+        // 阳性对照: 同一张目录里合规的那份一格都不该被削弱(否则上面两句是"全都宽化"的假绿).
+        JsonNode kept = wireNode(listedEntry("well_formed_neighbour", "104").get("inputSchema"));
+        assertEquals("string", kept.path("properties").path("p").path("type").asText());
+        assertTrue("合规广告不许被顺手抹掉: " + kept, kept.path("properties").path("p").size() > 0);
+    }
+
+    @Test
+    public void a_property_entry_that_is_not_a_schema_object_widens_on_its_own() throws Exception {
+        registerSchemaProbe("one_bad_property", "{\"type\":\"object\",\"properties\":{\"a\":5,\"b\":{\"type\":\"string\"}}}",
+                "{\"type\":\"object\",\"properties\":{\"r\":null},\"required\":[\"r\"]}", "ok");
+        JsonNode in = wireNode(listedEntry("one_bad_property", "105").get("inputSchema"));
+        assertTrue("坏的那一项要退化成接受任何值: " + in, in.path("properties").path("a").isObject());
+        assertEquals("退化就是空 schema, 不许留下别的键: " + in, 0, in.path("properties").path("a").size());
+        assertEquals("但它不该连累同槽的兄弟: " + in, "string", in.path("properties").path("b").path("type").asText());
+        JsonNode out = wireNode(listedEntry("one_bad_property", "106").get("outputSchema"));
+        assertTrue("properties 里写 null 也算不合形: " + out, out.path("properties").path("r").isObject());
+        assertEquals("required 与它无关, 不许一起消失: " + out, mapper.readTree("[\"r\"]"), out.path("required"));
+
+        // 整槽都不是对象的那一格: 只能不广告这一槽, 别的一格都不许动.
+        registerSchemaProbe("whole_slot_bad", "{\"type\":\"object\",\"properties\":5,\"required\":[\"a\"]}",
+                "{\"type\":\"object\",\"properties\":[],\"required\":[\"r\"]}", "ok");
+        JsonNode slotIn = wireNode(listedEntry("whole_slot_bad", "1061").get("inputSchema"));
+        assertFalse("properties 整槽不合形就不许上线: " + slotIn, slotIn.has("properties"));
+        assertEquals("同一条工具的 required 该原样留着: " + slotIn, mapper.readTree("[\"a\"]"), slotIn.path("required"));
+        JsonNode slotOut = wireNode(listedEntry("whole_slot_bad", "1062").get("outputSchema"));
+        assertFalse(slotOut.has("properties"));
+        assertEquals("object", slotOut.path("type").asText());
+    }
+
+    @Test
+    public void a_required_slot_that_is_not_an_array_is_dropped_without_touching_the_rest() throws Exception {
+        registerSchemaProbe("required_scalar", "{\"type\":\"object\",\"required\":\"a\"}",
+                "{\"type\":\"object\",\"properties\":{\"r\":{\"type\":\"integer\"}},\"required\":\"r\"}", "ok");
+        JsonNode in = wireNode(listedEntry("required_scalar", "107").get("inputSchema"));
+        JsonNode out = wireNode(listedEntry("required_scalar", "108").get("outputSchema"));
+        assertFalse("不合形的 required 只能整槽不广告: " + in, in.has("required"));
+        assertFalse(out.has("required"));
+        assertEquals("折形状只能削弱, 不许顺手发明槽位: " + in, mapper.readTree("{\"type\":\"object\"}"), in);
+        assertEquals("同槽其余部分原样: " + out, "integer", out.path("properties").path("r").path("type").asText());
+    }
+
+    @Test
+    public void a_required_array_keeps_only_its_string_entries() throws Exception {
+        // 一张表一次断言(#56 的纪律): "该留的没留"与"该丢的没丢"各自点名.
+        Object[][] rows = {
+                {"mixed", "[\"r\",5,null]", "[\"r\"]", true},
+                {"all-bad", "[5,7,null]", null, false},
+        };
+        List<String> wrong = new ArrayList<String>();
+        int i = 0;
+        for (Object[] row : rows) {
+            String name = "req_" + (++i);
+            registerSchemaProbe(name, "{\"type\":\"object\",\"properties\":{}}",
+                    "{\"type\":\"object\",\"properties\":{\"r\":{\"type\":\"integer\"}},\"required\":" + row[1] + "}", "ok");
+            JsonNode out = wireNode(listedEntry(name, "10" + i + "9").get("outputSchema"));
+            JsonNode expected = row[2] == null ? null : mapper.readTree(String.valueOf(row[2]));
+            JsonNode actual = out.has("required") ? out.get("required") : null;
+            if (!mapper.valueToTree(actual).equals(mapper.valueToTree(expected))) {
+                wrong.add(row[0] + " 得到 " + actual + " 期望 " + expected);
+            }
+        }
+        assertEquals(wrong.toString(), 0, wrong.size());
+    }
+
+    @Test
+    public void unknown_keywords_and_refs_survive_the_repair() throws Exception {
+        String declared = "{\"type\":\"object\",\"z-mcp/x\":1,\"additionalProperties\":false,"
+                + "\"$defs\":{\"R\":{\"type\":\"object\"}},\"$ref\":\"#/$defs/R\","
+                + "\"patternProperties\":{\"^a\":{\"type\":\"string\"}}}";
+        registerSchemaProbe("keeps_extra", declared, declared, "ok");
+        Map<String, Object> entry = listedEntry("keeps_extra", "111");
+        assertEquals("规范没锁 additionalProperties, 抹掉别人写的键是替上游做决定: ",
+                mapper.readTree(declared), wireNode(entry.get("inputSchema")));
+        assertEquals("outputSchema 同理: ",
+                mapper.readTree(declared), wireNode(entry.get("outputSchema")));
+    }
+
+    @Test
+    public void a_malformed_inputSchema_does_not_evict_its_neighbours() throws Exception {
+        assertCatalogSurvives("inputSchema", new String[]{
+                "{\"type\":\"string\"}", "{\"properties\":{\"a\":{\"type\":\"string\"}}}",
+                "{\"type\":\"object\",\"properties\":{\"a\":5}}", "{\"type\":\"object\",\"required\":\"a\"}",
+                "{\"type\":\"object\",\"properties\":{\"a\":5,\"b\":6}}"});
+    }
+
+    @Test
+    public void a_malformed_outputSchema_does_not_evict_its_neighbours() throws Exception {
+        assertCatalogSurvives("outputSchema", new String[]{
+                "{\"type\":\"string\"}", "{\"properties\":{\"r\":{\"type\":\"integer\"}}}",
+                "{\"type\":\"object\",\"properties\":{\"r\":5}}", "{\"type\":\"object\",\"required\":\"r\"}",
+                "{\"type\":\"object\",\"properties\":{\"r\":5},\"required\":[\"r\",7]}"});
+    }
+
+    /**
+     * 这一支才是 #63 的病象本身: 官方 TS 客户端把<b>整个</b> tools/list 结果过一次
+     * {@code ListToolsResultSchema}({@code shared/protocol.js:696}), 一条工具的形状不合形
+     * ⇒ 同目录里所有别的工具一起看不见. 所以判据不是"那条工具被宽化了", 而是"目录还剩几条".
+     */
+    private void assertCatalogSurvives(String slot, String[] malformed) throws Exception {
+        List<String> wrong = new ArrayList<String>();
+        int i = 0;
+        for (String declared : malformed) {
+            String name = "poison_" + slot + "_" + (++i);
+            registerSchemaProbe(name,
+                    "inputSchema".equals(slot) ? declared : "{\"type\":\"object\",\"properties\":{}}",
+                    "outputSchema".equals(slot) ? declared : "{\"type\":\"object\",\"properties\":{\"r\":{\"type\":\"integer\"}}}",
+                    "ok");
+            registry.tool("alive_a_" + i).description("d")
+                    .inputSchema("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\"]}")
+                    .register(args -> "ok");
+            registry.tool("alive_b_" + i).description("d")
+                    .inputSchema("{\"type\":\"object\",\"properties\":{}}")
+                    .outputSchema("{\"type\":\"object\",\"properties\":{\"r\":{\"type\":\"integer\"}},\"required\":[\"r\"]}")
+                    .register(args -> "ok");
+
+            Map<String, Object> entry = listedEntry(name, "12" + i);
+            assertNotNull("目录里读不到这条工具: " + name, entry);
+            assertEquals("一条畸形广告不该让别的工具消失: " + name, 3,
+                    countAlive(i, listedTools("12" + i)));
+            JsonNode wire = wireNode(entry.get(slot));
+            assertMcpSchemaSlot(wire, name + "." + slot, wrong);
+            String otherSlot = "inputSchema".equals(slot) ? "outputSchema" : "inputSchema";
+            assertMcpSchemaSlot(wireNode(entry.get(otherSlot)), name + "." + otherSlot, wrong);
+        }
+        assertEquals(wrong.toString(), 0, wrong.size());
+    }
+
+    private int countAlive(int i, java.util.List<Map<String, Object>> tools) {
+        int alive = 0;
+        for (Map<String, Object> t : tools) {
+            String n = String.valueOf(t.get("name"));
+            if (n.equals("poison_inputSchema_" + i) || n.equals("poison_outputSchema_" + i)
+                    || n.equals("alive_a_" + i) || n.equals("alive_b_" + i)) alive++;
+        }
+        return alive;
+    }
+
+    /**
+     * 真实读法那一层: 官方客户端是分页读目录的, 一条畸形广告不能让别人消失.
+     * pageSize 压到 1 ⇒ 每一页都要能被 {@code ListToolsResultSchema} 收下(zod 按整页判定),
+     * 遍历完必须还能看见那两条合规的.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    public void a_poisoned_entry_does_not_break_pagination() throws Exception {
+        registerSchemaProbe("poison_z1", "{\"type\":\"string\"}", "{\"type\":\"object\",\"required\":\"r\"}", "ok");
+        registerSchemaProbe("poison_z2", "{\"type\":\"object\",\"properties\":{\"a\":5}}",
+                "{\"properties\":{\"r\":{\"type\":\"integer\"}}}", "ok");
+        registry.tool("alive_z").description("d")
+                .inputSchema("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\"]}")
+                .outputSchema("{\"type\":\"object\",\"properties\":{\"r\":{\"type\":\"integer\"}},\"required\":[\"r\"]}")
+                .register(args -> "ok");
+        registry.tool("alive_y").description("d")
+                .inputSchema("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\"]}")
+                .outputSchema("{\"type\":\"object\",\"properties\":{\"r\":{\"type\":\"integer\"}},\"required\":[\"r\"]}")
+                .register(args -> "ok");
+
+        properties.setPageSize(1);
+        List<String> seen = new ArrayList<String>();
+        List<String> wrong = new ArrayList<String>();
+        String cursor = null;
+        int pages = 0;
+        Map<String, Object> page;
+        do {
+            page = resultOf(handler.handle(call("tools/list",
+                    cursor == null ? null : "{\"cursor\":\"" + cursor + "\"}", "1" + (++pages)),
+                    liveSession()));
+            java.util.List<Map<String, Object>> items =
+                    (java.util.List<Map<String, Object>>) page.get("tools");
+            assertTrue("分页走到一半给出空页: page=" + pages, !items.isEmpty());
+            assertTrue("每页至多 pageSize 项: " + items, items.size() <= 1);
+            for (Map<String, Object> t : items) {
+                String name = (String) t.get("name");
+                assertFalse("分页重复项: " + name, seen.contains(name));
+                seen.add(name);
+                for (String slot : new String[]{"inputSchema", "outputSchema"}) {
+                    if (t.get(slot) == null) continue;
+                    assertMcpSchemaSlot(wireNode(t.get(slot)), name + "." + slot, wrong);
+                }
+            }
+            cursor = (String) page.get("nextCursor");
+        } while (cursor != null);
+
+        assertTrue("合规的那条要还在目录里: " + seen, seen.contains("alive_z"));
+        assertTrue("合规的那条要还在目录里: " + seen, seen.contains("alive_y"));
+        assertTrue("畸形的那条也在(只是形状被折过): " + seen, seen.contains("poison_z1"));
+        assertEquals("每一页的形状都要过得了严格客户端: " + wrong, 0, wrong.size());
+    }
+
+    /**
+     * 根值连对象都不是的那一族(数组/字符串/数字/null/不可解) —— 这一格不是补形状能救的,
+     * 只能整份换成宽 schema. 变异体 M69_12(把这条分支摘掉, 让数组直接 `(ObjectNode)` 强转)
+     * 在别的手法里会一路炸成 JSON-RPC error, 整个 tools/list 一条工具都读不到.
+     */
+    @Test
+    public void a_schema_that_is_not_even_an_object_degrades_without_taking_the_catalog() throws Exception {
+        String[] roots = {"[]", "[1,2]", "\"not-json\"", "\"{\\\"type\\\":\\\"object\\\"}\"",
+                "5", "true", "null", "{", "{\"type\":", "   "};
+        List<String> wrong = new ArrayList<String>();
+        JsonNode permissive = mapper.readTree("{\"type\":\"object\",\"properties\":{}}");
+        int i = 0;
+        for (String declared : roots) {
+            String name = "not_object_" + (++i);
+            registerSchemaProbe(name, declared, declared, "ok");
+            registry.tool("alive_" + i).description("d")
+                    .inputSchema("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}}}")
+                    .register(args -> "ok");
+            Map<String, Object> entry = listedEntry(name, "14" + i);
+            assertNotNull("根值不合形的那条也要还在目录里: " + name, entry);
+            int alive = 0;
+            for (Map<String, Object> t : listedTools("14" + i)) {
+                String n = String.valueOf(t.get("name"));
+                if (n.equals(name) || n.equals("alive_" + i)) alive++;
+            }
+            assertEquals("一条不合形的广告不该让别人读不到: " + name, 2, alive);
+            for (String slot : new String[]{"inputSchema", "outputSchema"}) {
+                if ("outputSchema".equals(slot) && declared.trim().isEmpty()) {
+                    // 空白声明本来就不进线格(toolWire 的非空闸门), 这一格与折形状无关: 槽位必须缺席.
+                    if (entry.get(slot) != null) {
+                        wrong.add(name + "." + slot + " 空白声明不该被广告出去, 却带上了 " + entry.get(slot));
+                    }
+                    continue;
+                }
+                JsonNode wire = wireNode(entry.get(slot));
+                if (!wire.equals(permissive)) wrong.add(name + "." + slot + " 得到 " + wire + " 期望 " + permissive);
+            }
+        }
+        assertEquals(wrong.toString(), 0, wrong.size());
+        // 阳性对照: 合规的那一份不许被一起换成宽 schema(否则上面两句是"全都塌成兜底"的假绿).
+        registerSchemaProbe("not_object_control", "{\"type\":\"object\",\"properties\":{\"p\":{\"type\":\"string\"}}}",
+                null, "ok");
+        JsonNode kept = wireNode(listedEntry("not_object_control", "1499").get("inputSchema"));
+        assertEquals("string", kept.path("properties").path("p").path("type").asText());
+    }
+
+    @Test
+    public void what_we_advertise_is_what_we_enforce() throws Exception {
+        // 兑现与广告共用同一份折好的形状: 一边宽化另一边不宽化, 就会出现"看不见约束却被打红".
+        java.util.Map<String, Object> bad = new java.util.LinkedHashMap<String, Object>();
+        bad.put("count", "seven");
+        java.util.Map<String, Object> good = new java.util.LinkedHashMap<String, Object>();
+        good.put("count", Integer.valueOf(7));
+        registerSchemaProbe("declared_string_root", "{\"type\":\"object\",\"properties\":{}}",
+                "{\"type\":\"string\"}", good);
+        registerSchemaProbe("declared_string_root_in", "{\"type\":\"string\"}", null, good);
+        registerSchemaProbe("strict_control", "{\"type\":\"object\",\"properties\":{}}", COUNT_SCHEMA, bad);
+
+        Map<String, Object> r = toolsCall("declared_string_root", "131");
+        assertNull("广告已折成宽 schema, 兑现不许还按原来那份判红: " + r, r.get("isError"));
+        assertTrue("对象返回值该照常带 structuredContent: " + r, r.containsKey("structuredContent"));
+
+        // 改前实测: 一份 {"type":"string"} 的 inputSchema 会让校验器把每个对象入参判成违例,
+        // 于是这条工具被自己的畸形广告锁死 —— 线格式与校验必须吃同一份折好的形状.
+        Map<String, Object> called = resultOf(handler.handle(call("tools/call",
+                "{\"name\":\"declared_string_root_in\",\"arguments\":{\"a\":\"text\"}}", "132"), liveSession()));
+        assertFalse("不合形的 inputSchema 不该把工具锁死: " + verdictText(called),
+                verdictText(called).contains("invalid arguments"));
+
+        // 阳性对照: 合规的严格广告仍然兑现 —— 上面两句不是"兑现整条被摘掉"的假绿.
+        Map<String, Object> control = toolsCall("strict_control", "133");
+        assertEquals(Boolean.TRUE, control.get("isError"));
+        assertTrue("对照要说清违的是 outputSchema: " + verdictText(control),
+                verdictText(control).contains("produced output violating its outputSchema"));
+    }
+
     // ------------------------------------------------------------- annotations
 
     @Test
