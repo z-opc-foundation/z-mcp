@@ -23,9 +23,14 @@ import java.util.regex.PatternSyntaxException;
  * <p>后一组不是"顺手做的完备性": 两份官方 SDK 生成的 schema 主要约束就住在里面.
  * python SDK 1.27.1 + pydantic 2 把嵌套模型交成
  * {"$defs":{"M":{...}}, "properties":{"p":{"$ref":"#/$defs/M"}}}、把联合类型交成 anyOf
- * (~/.cache/zmcp_prey/ref48_schema_probe.py 量的是盘上那份包的真字节);
- * TS SDK 那侧 zod 在 draft-7 目标下用 definitions + allOf:[{"$ref":...}, ...].
- * 在认识它们之前, 这些 schema 的每一条实质约束都被"未知关键字不作约束"这条政策放掉了.
+ * (~/.cache/zmcp_prey/ref48_schema_probe.py 量的是盘上那份包的真字节).
+ * TS 那侧量的是盘上 zod 4.6.5 自带的 toJSONSchema (ref48_zod_probe.js → .log, 默认与
+ * reused:'ref' 两种都量过): 递归模型在 draft-07 目标下交出 {"allOf":[{"$ref":"#"}]} ——
+ * 指针指向**文档根**, 2020-12 目标是裸 {"$ref":"#"}; 抽公共子模型时才出现
+ * {"definitions":{"__schema0":{...}}, "properties":{"a":{"$ref":"#/definitions/__schema0"}}},
+ * 默认则原地内联. "zod 一定会发 definitions" 是没量过的说法, 所以按容器名认识它不够,
+ * 指针本身要能落到根上、落到非标准容器里.
+ * 在认识这些关键字之前, 它们携带的每一条实质约束都被"未知关键字不作约束"这条政策放掉了.
  *
  * <p>目标是"够用且不假通过": 认不得的关键字一律忽略(按 JSON Schema 语义, 未知关键字不作约束),
  * 但一旦某个关键字被支持, 它一定给出确定结论 —— 所以**指不到的 $ref 是一次违规, 不是放行**.
@@ -323,8 +328,10 @@ public class JsonSchemaValidator {
         }
         JsonNode items = schema.get("items");
         if (items != null && !items.isNull()) {
-            // items 也可以是一份布尔 schema (zod 的 .tuple(...) 收尾用 items: false);
-            // 数组形式的 tuple/prefixItems 仍然不认, 见 README「已知边界」.
+            // items 也可以是一份布尔 schema —— 布尔子 schema 两份参照都认 (ref48_bool_schema.log
+            // 量了顶层、properties 里、$ref 指进去三个位置), 所以这里不特殊处理, 交给 walk()
+            // 的布尔分支. 而 zod 4 的 tuple 实测交的是**数组**形式 items + additionalItems:false
+            // (ref48_zod_probe.log), 那一种不认, 见 README「已知边界」.
             for (int i = 0; i < node.size(); i++) {
                 walk(items, node.get(i), path + "[" + i + "]", ctx, errors);
             }

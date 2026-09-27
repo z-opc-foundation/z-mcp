@@ -109,8 +109,12 @@ public class JsonSchemaValidatorTest {
     //     嵌套 pydantic 模型交出来的 inputSchema 就是
     //     {"$defs":{"Address":{...}}, "properties":{"a":{"$ref":"#/$defs/Address"}}};
     //     联合类型交成 anyOf; 自引用模型交成一条指回同一个 $defs 条目的 $ref.
-    //   ~/.cache/zmcp_prey/tsclient/ref48_zod_probe.js 跑 TS SDK 那侧的 zod:
-    //     draft-7 目标下用 definitions + allOf:[{"$ref":...}, ...].
+    //   ~/.cache/zmcp_prey/tsclient/ref48_zod_probe.js 跑盘上那份 zod@4.6.5 自带的
+    //     toJSONSchema: 递归模型在 draft-07 目标下默认交 {"allOf":[{"$ref":"#"}]} (指针指根),
+    //     只有显式 reused:'ref' 才出现 definitions + "#/definitions/__schema0";
+    //     默认不抽公共子模型 (原地内联). 联合交 anyOf, z.record 交 additionalProperties 为 schema.
+    //   (这一格上一版探针是**坏的**: 它拿 zod-to-json-schema@3.25.2 去喂 zod@4.6.5,
+    //    三格全交 {"$schema":...} 空壳而照样打印 —— 所以新探针带了一条"空壳即 FATAL"的对照.)
     // 修复前这些关键字**一个都不认识**, 全部走"未知关键字不作约束"那一支 ——
     // 也就是说官方 SDK 生成的主要约束被整段放行. 下面每一条红探针都对应上面的一份字节.
 
@@ -350,6 +354,33 @@ public class JsonSchemaValidatorTest {
                 + "\"B\":{\"$ref\":\"#/$defs/A\"}},\"$ref\":\"#/$defs/A\"}", "{\"k\":1}");
         assertFalse("互指环没被拦住", mutual.isEmpty());
         assertTrue("要说明是被递归闸拦下的: " + mutual, mutual.get(0).contains("recurs"));
+    }
+
+    @Test(timeout = 30_000L)
+    public void the_recursion_shape_zod_emits_by_default_is_enforced() throws Exception {
+        // 盘上 zod@4.6.5 的 z.toJSONSchema(T, {target:'draft-07'}) 对
+        // `child: optional(lazy(() => T))` 交出来的就是这一段 (ref48_zod_probe.log):
+        // 一层 allOf 裹着指回**文档根**的 $ref —— 不是设想的 "#/$defs/T".
+        // 参照两侧在这六格实例上读数一致 (ajv 与 jsonschema 各 6 格, 见 README 台账那一笔).
+        String s = "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"},"
+                + "\"child\":{\"allOf\":[{\"$ref\":\"#\"}]}},"
+                + "\"required\":[\"value\"],\"additionalProperties\":false}";
+        assertOk(s, "{\"value\":1}");
+        assertOk(s, "{\"value\":1,\"child\":{\"value\":2,\"child\":{\"value\":3}}}");
+        // 上面那格同时是闸的阳性对照: 只看 ref 串不看实例路径的实现会在这里误判成环.
+        List<String> deep = errorsOf(s, "{\"value\":1,\"child\":{\"value\":\"x\"}}");
+        assertFalse("根指针递归里的叶子约束没生效: " + deep, deep.isEmpty());
+        assertTrue("要报在真实的实例深度上: " + deep, deep.get(0).contains("$.child.value"));
+        assertFalse("child 为 null 该按对象判: ",
+                errorsOf(s, "{\"value\":1,\"child\":null}").isEmpty());
+        // 这两格才管"展开根 ref 之后同级关键字还算不算": 违规落在**递归层**上,
+        // 只有 $ref 真把根 schema 摆到 $.child 处才红得出来
+        // (参照两侧对这六格的读数逐格相同, ~/.cache/zmcp_prey/tsclient/ref48_zod_oracle.log).
+        List<String> extra = errorsOf(s, "{\"value\":1,\"child\":{\"value\":2,\"extra\":1}}");
+        assertFalse("递归层上的同级 additionalProperties 没生效: " + extra, extra.isEmpty());
+        assertTrue("要报在递归层那一个节点上: " + extra, extra.get(0).startsWith("$.child:"));
+        assertFalse("递归层上根 schema 的 required 也该照算: ",
+                errorsOf(s, "{\"value\":1,\"child\":{}}").isEmpty());
     }
 
     @Test
