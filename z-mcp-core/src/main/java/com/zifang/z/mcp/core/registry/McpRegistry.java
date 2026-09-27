@@ -564,6 +564,9 @@ public class McpRegistry {
     /**
      * 工具执行器 SPI — 与 kernel.tool.Tool 解耦, 接受 Map, 返回任意可 JSON 序列化对象
      * 或 {@link com.zifang.z.mcp.api.dto.CallToolResult}(需要完全掌控内容块时).
+     *
+     * <p>"完全掌控内容块"不包括绕过 {@code outputSchema}: 广告了那份 schema 的工具,
+     * 交回的 {@code structuredContent} 一律要过一遍校验(判红走 isError, 不是 JSON-RPC error).
      */
     public interface ToolExecutor {
         Object execute(Map<String, Object> arguments) throws Exception;

@@ -2,7 +2,9 @@ package com.zifang.z.mcp.core.protocol;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.zifang.z.mcp.api.dto.CallToolResult;
 import com.zifang.z.mcp.api.dto.ContentBlock;
+import com.zifang.z.mcp.api.dto.McpToolDto;
 import com.zifang.z.mcp.api.dto.ToolAnnotations;
 import com.zifang.z.mcp.api.exception.McpException;
 import com.zifang.z.mcp.core.properties.McpProperties;
@@ -468,6 +470,143 @@ public class McpProtocolHandlerTest {
         assertEquals("image", content.get(0).get("type"));
         assertEquals("AQID", content.get(0).get("data"));
         assertEquals("image/png", content.get(0).get("mimeType"));
+    }
+
+    // ------------------------------ outputSchema 与"工具自己交回 CallToolResult"这一支
+
+    private static final String COUNT_SCHEMA =
+            "{\"type\":\"object\",\"properties\":{\"count\":{\"type\":\"integer\"}},"
+                    + "\"required\":[\"count\"]}";
+
+    /** 生产者自己排版的 JSON —— 交回一份带 structuredContent 的结果. */
+    private CallToolResult structuredResult(String json) throws Exception {
+        return CallToolResult.structured(mapper.readTree(json), json);
+    }
+
+    private void registerResultTool(String name, String outputSchema, Object returned) {
+        McpRegistry.Builder b = registry.tool(name)
+                .description("returns a hand-built result")
+                .inputSchema("{\"type\":\"object\",\"properties\":{}}");
+        if (outputSchema != null) b.outputSchema(outputSchema);
+        b.register(args -> returned);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> toolsCall(String name, String id) throws Exception {
+        return resultOf(handler.handle(call("tools/call",
+                "{\"name\":\"" + name + "\",\"arguments\":{}}", id), liveSession()));
+    }
+
+    @SuppressWarnings("unchecked")
+    private String verdictText(Map<String, Object> result) {
+        java.util.List<Map<String, Object>> content =
+                (java.util.List<Map<String, Object>>) result.get("content");
+        assertNotNull("结果里一个内容块都没有: " + result, content);
+        assertEquals("判红只该有一块说明: " + content, 1, content.size());
+        return (String) content.get(0).get("text");
+    }
+
+    @Test
+    public void a_violating_call_tool_result_is_reported_as_an_execution_error() throws Exception {
+        // 广告的 schema 是自己的承诺: 手工搭的结果没有绕过校验的通道.
+        registerResultTool("block_bad", COUNT_SCHEMA, structuredResult("{\"count\":\"seven\"}"));
+        Map<String, Object> r = toolsCall("block_bad", "61");
+        assertEquals(Boolean.TRUE, r.get("isError"));
+        String text = verdictText(r);
+        assertTrue("要点名违反的是 outputSchema: " + text,
+                text.contains("produced output violating its outputSchema"));
+        assertTrue("要带出校验器的原话: " + text,
+                text.contains("$.count: expected type integer but got string"));
+        assertNull("判红之后不许把违例字节再发一遍: " + r, r.get("structuredContent"));
+    }
+
+    @Test
+    public void both_return_shapes_give_the_same_verdict_for_the_same_violation() throws Exception {
+        // 两支各写一份判定迟早分叉(#48-#55 的校验器只有一份, 出口却曾是两条).
+        Map<String, Object> bad = new java.util.LinkedHashMap<String, Object>();
+        bad.put("count", "seven");
+        registry.tool("via_map").description("returns a map")
+                .inputSchema("{\"type\":\"object\",\"properties\":{}}")
+                .outputSchema(COUNT_SCHEMA).register(args -> bad);
+        registerResultTool("via_block", COUNT_SCHEMA, structuredResult("{\"count\":\"seven\"}"));
+        String mapVerdict = verdictText(toolsCall("via_map", "62"));
+        String blockVerdict = verdictText(toolsCall("via_block", "63"));
+        assertEquals("同一个违例在两支上必须同一句话(只换工具名)",
+                mapVerdict.replace("via_map", "TOOL"), blockVerdict.replace("via_block", "TOOL"));
+    }
+
+    @Test
+    public void a_conforming_call_tool_result_keeps_the_producers_own_bytes() throws Exception {
+        // 校验是给违例用的, 不是把合规的产物重排一遍.
+        String produced = "{ \"count\" : 7 }";
+        registerResultTool("block_ok", COUNT_SCHEMA, structuredResult(produced));
+        Map<String, Object> r = toolsCall("block_ok", "64");
+        assertNull("合规不许变红: " + r, r.get("isError"));
+        assertEquals("内容块要原样留着: " + r, produced, verdictText(r));
+        assertEquals(7, ((Number) wireMap(r.get("structuredContent")).get("count")).intValue());
+    }
+
+    @Test
+    public void an_advertised_output_schema_demands_structured_content() throws Exception {
+        // 两家参照在"缺 structuredContent"上同判(TS 抛 Output validation error / python model_validate(None)).
+        registerResultTool("block_bare", COUNT_SCHEMA, CallToolResult.text("42"));
+        Map<String, Object> r = toolsCall("block_bare", "65");
+        assertEquals(Boolean.TRUE, r.get("isError"));
+        assertTrue("要说清缺的是哪一半: " + verdictText(r),
+                verdictText(r).contains("declares an outputSchema but returned no structuredContent"));
+    }
+
+    @Test
+    public void an_error_result_is_never_relabelled_as_a_schema_violation() throws Exception {
+        // isError 是给模型自我纠正的生产者原话, 改判成校验失败会把它盖掉.
+        CallToolResult failed = CallToolResult.text("upstream said no");
+        failed.setError(true);
+        failed.setStructuredContent(mapper.readTree("{\"count\":\"seven\"}"));
+        registerResultTool("block_failed", COUNT_SCHEMA, failed);
+        Map<String, Object> r = toolsCall("block_failed", "66");
+        assertEquals(Boolean.TRUE, r.get("isError"));
+        assertEquals("原话一个字不许改", "upstream said no", verdictText(r));
+        assertFalse("不许顺手换上校验器的话: " + verdictText(r),
+                verdictText(r).contains("outputSchema"));
+    }
+
+    @Test
+    public void an_undeclared_output_schema_gains_no_constraints() throws Exception {
+        // 没广告就没有承诺: 非对象的 structuredContent 也不该被兜底 schema 判红.
+        registerResultTool("block_free", null, structuredResult("5"));
+        Map<String, Object> r = toolsCall("block_free", "67");
+        assertNull("没声明 schema 就不许凭空长出约束: " + r, r.get("isError"));
+        assertEquals("5", verdictText(r));
+        assertEquals(5, wireNode(r.get("structuredContent")).asInt());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void a_relayed_result_is_checked_against_the_schema_the_hub_copied() throws Exception {
+        // hub 把上游的 outputSchema 逐字抄进目录, 于是这条广告由 hub 对客户负责.
+        McpToolDto upstreamTool = new McpToolDto("translated", null, "an upstream tool",
+                "ref-upstream", "{\"type\":\"object\",\"properties\":{}}", COUNT_SCHEMA, null);
+        final java.util.Map<String, Object> relayed = new java.util.LinkedHashMap<String, Object>();
+        relayed.put("count", "seven");                       // fromWire 交回的是普通 Map
+        List<String> names = registry.replaceServerTools("ref-upstream",
+                java.util.Collections.singletonList(upstreamTool),
+                tool -> args -> CallToolResult.structured(relayed, "{\"count\":\"seven\"}"));
+        String published = names.get(0);
+
+        java.util.List<Map<String, Object>> tools =
+                (java.util.List<Map<String, Object>>) resultOf(
+                        handler.handle(call("tools/list", null, "68"), liveSession())).get("tools");
+        Map<String, Object> advertised = null;
+        for (Map<String, Object> t : tools) if (published.equals(t.get("name"))) advertised = t;
+        assertNotNull("目录里该有这条转发工具", advertised);
+        assertEquals("广告侧抄的是上游那份 schema",
+                mapper.readTree(COUNT_SCHEMA), mapper.valueToTree(advertised.get("outputSchema")));
+
+        Map<String, Object> r = toolsCall(published, "69");
+        assertEquals(Boolean.TRUE, r.get("isError"));
+        assertTrue("兑现侧要挡下上游的违例字节: " + verdictText(r),
+                verdictText(r).contains("produced output violating its outputSchema"));
+        assertNull(r.get("structuredContent"));
     }
 
     // ------------------------------------------------------------- annotations

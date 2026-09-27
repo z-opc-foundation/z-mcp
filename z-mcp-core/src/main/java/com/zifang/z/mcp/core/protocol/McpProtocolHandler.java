@@ -459,7 +459,7 @@ public class McpProtocolHandler {
 
     /** 工具返回值 → 协议要求的类型化内容块数组. */
     CallToolResult normalize(McpRegistry.ToolEntry entry, Object raw) {
-        if (raw instanceof CallToolResult) return (CallToolResult) raw;
+        if (raw instanceof CallToolResult) return honorDeclaredOutputSchema(entry, (CallToolResult) raw);
         if (raw == null) return CallToolResult.of(new ArrayList<ContentBlock>());
         if (raw instanceof CharSequence || raw instanceof Character) {
             return CallToolResult.text(raw.toString());
@@ -505,6 +505,41 @@ public class McpProtocolHandler {
             return CallToolResult.executionError("tool " + entry.name
                     + " returned a value that cannot be serialized: " + describe(e));
         }
+    }
+
+    /**
+     * 工具自己交回 {@link CallToolResult} 时, 广告过的 outputSchema 仍然要兑现.
+     *
+     * <p>两家官方参照都在这一支校验并把违例折成 isError(不是 JSON-RPC error): python mcp 1.27.1
+     * {@code fastmcp/utilities/func_metadata.py:115-118} 对 CallToolResult 走
+     * {@code output_model.model_validate(result.structuredContent)}; TS sdk 1.30.1
+     * {@code server/mcp.js} 的 {@code validateToolOutput()} 在缺 structuredContent 时抛
+     * "has an output schema but no structured content was provided". 缺字段与内容违例两家同判.
+     *
+     * <p>isError 不校验: 那是给模型自我纠正的生产者原话, 改判成校验失败会把它盖掉(TS 同顺序).
+     */
+    private CallToolResult honorDeclaredOutputSchema(McpRegistry.ToolEntry entry, CallToolResult result) {
+        String declared = entry.outputSchemaJson;
+        if (declared == null || declared.trim().isEmpty() || result.isError()) return result;
+        Object structured = result.getStructuredContent();
+        if (structured == null) {
+            return CallToolResult.executionError("tool " + entry.name
+                    + " declares an outputSchema but returned no structuredContent");
+        }
+        try {
+            JsonNode node = structured instanceof JsonNode
+                    ? (JsonNode) structured : mapper.valueToTree(structured);
+            List<String> violations =
+                    validator.validate(parseSchema(declared, entry.name, "outputSchema"), node);
+            if (!violations.isEmpty()) {
+                return CallToolResult.executionError("tool " + entry.name
+                        + " produced output violating its outputSchema: " + join(violations, "; "));
+            }
+        } catch (Exception e) {
+            return CallToolResult.executionError("tool " + entry.name
+                    + " returned structuredContent that cannot be serialized: " + describe(e));
+        }
+        return result;
     }
 
     private static final class ToolTimeout extends Exception {
