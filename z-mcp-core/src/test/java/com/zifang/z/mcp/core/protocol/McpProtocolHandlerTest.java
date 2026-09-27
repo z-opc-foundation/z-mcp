@@ -369,6 +369,35 @@ public class McpProtocolHandlerTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    public void a_constraint_behind_a_ref_is_enforced_end_to_end() throws Exception {
+        // #48 的接线层: 官方 python SDK 交出来的 inputSchema 把主要约束藏在 $ref 后面.
+        // 校验器自己的单测绿, 不代表 tools/call 真的把这条违规带回给模型 —— 所以这一条
+        // 从 JSON-RPC 帧进、从 content[0].text 出, 中间不许有任何"手工平铺 schema"的捷径.
+        registry.registerBuiltin("visit", "records a visit",
+                "{\"$defs\":{\"Address\":{\"type\":\"object\",\"properties\":{"
+                        + "\"city\":{\"type\":\"string\"},"
+                        + "\"zipcode\":{\"type\":\"string\",\"pattern\":\"^\\\\d{6}$\"}},"
+                        + "\"required\":[\"city\",\"zipcode\"]}},"
+                        + "\"type\":\"object\",\"properties\":{\"a\":{\"$ref\":\"#/$defs/Address\"}},"
+                        + "\"required\":[\"a\"]}",
+                args -> "ok");
+
+        Map<String, Object> r = resultOf(handler.handle(call("tools/call",
+                "{\"name\":\"visit\",\"arguments\":{\"a\":{\"city\":\"hz\"}}}", "45"), liveSession()));
+        assertEquals(Boolean.TRUE, r.get("isError"));
+        String text = (String) ((java.util.List<Map<String, Object>>) r.get("content")).get(0).get("text");
+        assertTrue("要把解析后的路径与字段名带回给模型: " + text,
+                text.contains("$.a") && text.contains("zipcode"));
+
+        // 阳性对照: 同一台工具, 参数补齐就必须真跑到实现里去
+        Map<String, Object> ok = resultOf(handler.handle(call("tools/call",
+                "{\"name\":\"visit\",\"arguments\":{\"a\":{\"city\":\"hz\",\"zipcode\":\"311100\"}}}",
+                "46"), liveSession()));
+        assertFalse("补齐参数反而被误拒: " + ok, Boolean.TRUE.equals(ok.get("isError")));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     public void throwing_tool_is_execution_error() throws Exception {
         Map<String, Object> r = resultOf(handler.handle(call("tools/call",
                 "{\"name\":\"boom\",\"arguments\":{}}", "18"), liveSession()));
