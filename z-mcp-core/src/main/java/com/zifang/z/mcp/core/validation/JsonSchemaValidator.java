@@ -41,7 +41,15 @@ public class JsonSchemaValidator {
     /** @return 违规描述列表, 空表示通过. */
     public List<String> validate(JsonNode schema, JsonNode instance) {
         List<String> errors = new ArrayList<String>();
-        if (schema == null || schema.isNull() || !schema.isObject()) return errors;
+        // 没有 schema (上游压根没声明) 与"声明了一个不配当 schema 的东西"是两回事:
+        // 前者不作约束, 后者按"认得就必须给确定结论"的政策一律红 —— ajv 在这一步是直接抛
+        // ("schema must be object or boolean"), jsonschema 同样拒绝 (ref48_bogus_schema_*.log).
+        if (schema == null || schema.isNull()) return errors;
+        if (!schema.isObject() && !schema.isBoolean()) {
+            errors.add("$: a schema must be an object or a boolean but is "
+                    + jsonType(schema) + " " + literal(schema) + ", refusing to treat it as no constraint");
+            return errors;
+        }
         walk(schema, instance, "$", new Ctx(schema), errors);
         return errors;
     }

@@ -354,6 +354,40 @@ public class JsonSchemaValidatorTest {
     }
 
     @Test
+    public void a_ref_does_not_swallow_the_keywords_beside_it() throws Exception {
+        // 2019-09 起 $ref 明确"像 allOf 一样", 同级关键字各自照算. 这四格的期望值不是推的:
+        // ajv (~/.cache/zmcp_prey/tsclient/ref48_mut_probe.js -> ref48_mut_probe.log) 与
+        // jsonschema 4.25.1 (ref48_mut_probe_py.log) 逐格相同.
+        String s = "{\"$ref\":\"#/$defs/S\",\"minLength\":5,\"$defs\":{\"S\":{\"type\":\"string\"}}}";
+        assertFalse("同级 minLength 被 $ref 吞掉了", errorsOf(s, "\"ab\"").isEmpty());
+        assertOk(s, "\"abcde\"");
+        // 同级 type 与 $ref 目标冲突时, 两支都要红 (不是"后面那条盖掉前面")
+        String clash = "{\"$ref\":\"#/$defs/S\",\"type\":\"number\",\"$defs\":{\"S\":{\"type\":\"string\"}}}";
+        assertFalse(clash, errorsOf(clash, "\"x\"").isEmpty());
+        // 同级 required 住在 refs 背后一样要算
+        String req = "{\"$ref\":\"#/$defs/P\",\"required\":[\"extra\"],"
+                + "\"$defs\":{\"P\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}}}}}";
+        List<String> e = errorsOf(req, "{\"a\":\"x\"}");
+        assertFalse("$ref 之后的同级 required 没算: " + e, e.isEmpty());
+        assertTrue("要报的正是同级那条: " + e, e.get(0).contains("'extra'"));
+        assertOk(req, "{\"a\":\"x\",\"extra\":1}");
+    }
+
+    @Test
+    public void a_schema_that_is_neither_object_nor_boolean_is_not_silently_accepted() throws Exception {
+        // 顶层也是 schema: 恒假就是把一切入参拒掉. 两份参照都这么判
+        // (false -> INVALID / true -> VALID, 见 ref48_mut_probe.log 与 ref48_mut_probe_py.log).
+        // 这一格在 hub 上是真实可达的: 上游交什么 inputSchema 我们就按什么校验.
+        assertFalse("恒假 schema 在顶层被放过了", errorsOf("false", "5").isEmpty());
+        assertOk("true", "5");
+        // 既不是对象也不是布尔的东西不配当 schema: 参照实现是直接抛
+        // (ref48_bogus_schema_ajv.log: "schema must be object or boolean"), 我们要一条违规
+        assertFalse("一个字符串被当成没有约束放行了", errorsOf("\"not a schema\"", "5").isEmpty());
+        // 没有 schema (null) 仍然是"没声明约束", 与上面两种区分开
+        assertOk("null", "5");
+    }
+
+    @Test
     public void the_def_container_itself_is_not_treated_as_instance_constraints() throws Exception {
         // $defs 只是容器: 里面的东西在没有被 $ref 指到之前不该参与判定.
         assertOk("{\"type\":\"object\",\"$defs\":{\"Unused\":{\"type\":\"object\","
