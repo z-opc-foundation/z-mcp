@@ -200,6 +200,30 @@ public class JsonSchemaValidatorTest {
                 + "{\"$ref\":\"#/$defs/A%20B\"}}}", "{\"p\":\"v\"}");
         assertFalse(errorsOf("{\"$defs\":{\"A B\":{\"type\":\"string\"}},\"properties\":{\"p\":"
                 + "{\"$ref\":\"#/$defs/A%20B\"}}}", "{\"p\":5}").isEmpty());
+
+        // ~0 与 ~1 的**解序**也要钉住: RFC 6901 规定先解 ~1 再解 ~0, 所以指针里的 "~01"
+        // 指的是字面键 "~1" (而不是 "/"). 两格期望值同为 ajv/jsonschema 对拍 (ref48_tilde01_*.log).
+        assertOk("{\"$defs\":{\"~1\":{\"type\":\"string\"}},\"properties\":{\"p\":"
+                + "{\"$ref\":\"#/$defs/~01\"}}}", "{\"p\":\"v\"}");
+        assertFalse("解序漂了会把 ~01 解成 /, 指到别处就算绿: 这格必须仍按 ~1 这个键约束",
+                errorsOf("{\"$defs\":{\"~1\":{\"type\":\"string\"}},\"properties\":{\"p\":"
+                        + "{\"$ref\":\"#/$defs/~01\"}}}", "{\"p\":5}").isEmpty());
+
+        // 指针可以落在数组下标上 (zod 的 allOf:[{$ref}] 这类形状就带下标).
+        // ajv 判 {"p":"x"} 违规、{"p":3} 通过 (ref48_tilde01_ajv.log 后两行).
+        String pair = "{\"$defs\":{\"Pair\":[{\"type\":\"string\"},{\"type\":\"integer\"}]},"
+                + "\"properties\":{\"p\":{\"$ref\":\"#/$defs/Pair/1\"}}}";
+        assertOk(pair, "{\"p\":3}");
+        assertFalse("数组下标指针没解出来: ", errorsOf(pair, "{\"p\":\"x\"}").isEmpty());
+        // 越界下标 = 指不到东西, 按同一政策红 (ajv 在这里直接抛 MissingRefError).
+        // 两格都要钉: 只钉 3 的话, "把越界夹成 0 号元素"那种退化实现照样绿.
+        String badIdx = "{\"$defs\":{\"Pair\":[{\"type\":\"string\"}]},"
+                + "\"properties\":{\"p\":{\"$ref\":\"#/$defs/Pair/7\"}}}";
+        List<String> oob = errorsOf(badIdx, "{\"p\":3}");
+        assertFalse("越界下标被当成解到了: " + oob, oob.isEmpty());
+        assertTrue("要说清是哪条指针指不到: " + oob, oob.get(0).contains("#/$defs/Pair/7"));
+        assertFalse("越界退化成按 0 号元素判 (而 0 号恰好合得上) 也算放行: ",
+                errorsOf(badIdx, "{\"p\":\"s\"}").isEmpty());
     }
 
     @Test
@@ -209,6 +233,15 @@ public class JsonSchemaValidatorTest {
         List<String> e = errorsOf(dangling, "{\"a\":{\"x\":1}}");
         assertFalse("指针指不到东西不等于没有约束: " + e, e.isEmpty());
         assertTrue("要说清楚是哪个指针: " + e, e.get(0).contains("#/$defs/Nope"));
+
+        // 另一条出口: 指针一路走到底, 落下来的东西是 JSON null ("$defs":{"Nope":null}).
+        // 上面那条 dangling 走的是"容器就没这个键"的出口, 这一格才钉住"落到 null 值"那一支 ——
+        // 少这一格, "把这支改成静默 return" 的变异没人抓 (实测 M02 一度如此).
+        List<String> nullTarget = errorsOf("{\"$defs\":{\"Nope\":null},\"type\":\"object\","
+                + "\"properties\":{\"a\":{\"$ref\":\"#/$defs/Nope\"}},\"required\":[\"a\"]}",
+                "{\"a\":{\"x\":1}}");
+        assertFalse("指针落到 null 值被当成没有约束放过了: " + nullTarget, nullTarget.isEmpty());
+        assertTrue("要报的是指针而不是别的: " + nullTarget, nullTarget.get(0).contains("#/$defs/Nope"));
 
         // 阳性对照: 同一份 schema 只把目标补上, 就必须改成按目标约束,
         // 而不是"永远报指不到" —— 否则上一条红是尺坏不是实例红.
