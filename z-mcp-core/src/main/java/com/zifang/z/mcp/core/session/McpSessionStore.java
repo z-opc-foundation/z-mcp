@@ -358,9 +358,15 @@ public class McpSessionStore {
          * 改之前一条 {@code list_changed} 事件是 3 个写出单元, 而 CI 上那条 {@code Premature EOF} 每次红,
          * 客户端手里都是恰好第一个写出单元的内容
          * ({@code 读到: id:2}) —— 容器在缝里把连接收走了, 半截帧就到了客户端手上。自己攒整帧交出去之后
-         * 帧内没有缝: 写出要么整帧落地、要么一帧都不落地, 客户端的位置永远停在完整帧上, 续传契约
-         * (按 Last-Event-ID 补)才有意义。它不保证流不会被收走 —— 帧与帧之间照样能切, 那一半由
-         * {@code ZMcpSseAbandonResumeStressTest} 断言"切开不许丢事件"。
+         * **帧内没有 flush 缝**: 我们这一侧每帧只交一段字节。
+         *
+         * <p>但这**不是**"整帧原子送达"的保证, 而且是量出来的: run {@code 36336993342}(与打印
+         * {@code torn=0} 那一跑同一枚行为字节)的 jdk17 格照样 {@code rounds=5 torn=1 lost=0} —— 一次
+         * flush 自己就能被容器切在中间, 那一半我们控制不了。所以这里守得住的不变量只有一条窄的:
+         * 客户端的位置永远停在**它读得完的那一帧**上(SSE 只在空行处提交事件, 没读全的一帧不会推进它的
+         * 位置, 于是按 {@code Last-Event-ID} 续传不会续到错的地方)。缝少了意味着"能留下半个事件的位置"
+         * 变少了, 不意味着"能切开的位置"没了 —— 后者由 {@code ZMcpSseAbandonResumeStressTest} 断言
+         * "切开不许丢事件"({@code lost=0}), 那一半才是承诺。
          *
          * <p>字节与拆帧写法逐字相同: {@link WholeFrame} 只改"几个写出单元", 不改一个字节, 也不改
          * 载荷走的那个转换器与字符集(见 {@link WholeFrame} 里 mediaType 那一句)。
