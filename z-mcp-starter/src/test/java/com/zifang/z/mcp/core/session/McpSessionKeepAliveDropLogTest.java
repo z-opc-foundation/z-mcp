@@ -22,7 +22,8 @@ import static org.junit.Assert.assertTrue;
  * 心跳写失败摘一条流, 后果必须与广播写失败**完全同形**.
  *
  * <p>为什么单独钉这一支: {@code McpSessionStore} 里有两个几乎逐字相同的 catch —— {@code emit()}
- * 的那个由 {@code ZMcpSseStreamDropLogTest} 钉住了, 而 {@code sendKeepAlive()} 这个在此之前
+ * 的那个由 {@code ZMcpSseStreamDropLogTest} 钉住了, 而心跳那一次写出(现在叫
+ * {@code dispatchKeepAlive()}, 写这一支时还叫 {@code sendKeepAlive()})在此之前
  * **一条用例都没碰过**(全仓 {@code grep sendKeepAlive} 只有它自己的声明与 {@code tick()} 的调用点)。
  * 偏偏"客户端在一条安静的流上跑掉了"是生产与 CI 上真出现过的症状: README 记的那条 jdk17 runner 上的
  * {@code Premature EOF}(拿到 200 + {@code text/event-stream} 后一字节未读到) 走的就是心跳这条路。
@@ -30,7 +31,7 @@ import static org.junit.Assert.assertTrue;
  * <p>这个类为什么在 starter 模块里、却写着 core 的包名: 判据要读日志, 而 core 的测试 classpath 上
  * 只有 {@code slf4j-api} 没有任何 binding(与 {@code ZMcpSseStreamDropLogTest} 同一个理由),
  * 挂在 NOP logger 上的 appender 永远收不到事件 —— 那条用例会以"绿"的方式什么都量不到;
- * 同时 {@code tick()} 与 {@code sendKeepAlive()} 是包内可见的, 只有落在 core 的包里才叫得动,
+ * 同时 {@code tick()} 与 {@code dispatchKeepAlive()} 是包内可见的, 只有落在 core 的包里才叫得动,
  * 叫得动才不必靠"配 1 秒然后睡"来推 —— 那条类里已有的时间耦合断言在 CI 上红过一次(#37)。
  */
 public class McpSessionKeepAliveDropLogTest {

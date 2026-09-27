@@ -14,18 +14,26 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -45,9 +53,27 @@ public class McpSessionStore {
 
     /**
      * 心跳注释帧的内容. 注释帧不带 id 也不带 data, 因此在 SSE 客户端那里是不可见的空行 ——
-     * 它唯一的作用是"让中间层看到这条连接还在说话", 所以它**不能**去占事件序号(见 {@link McpSession#sendKeepAlive()}).
+     * 它唯一的作用是"让中间层看到这条连接还在说话", 所以它**不能**去占事件序号(见 {@link McpSession#dispatchKeepAlive}).
      */
     public static final String KEEP_ALIVE_COMMENT = "keep-alive";
+
+    /**
+     * 一次心跳最多同时占用几根写出线程.
+     *
+     * <p>这就是"能同时卡住多少个对端"的上限: 超出的那些当拍派不出去(会点名), 下一拍再试。
+     * 取 8 而不是 1 的理由是实测的形状 —— 一个跑掉的客户端不会只留一条流, 而一次卡住的写要占到
+     * 容器自己的阻塞写超时才松手(本机 Tomcat 实测 65 秒, 台账见 README「#60」那一格)。
+     */
+    static final int KEEP_ALIVE_WRITERS = 8;
+
+    /**
+     * 一拍心跳里, 敲 {@link #tick()} 的那根线程最多等多久.
+     *
+     * <p>预算只管"计时线程被拖多久", 不管帧本身: 过了预算, 还在写的那条既不记账也不算丢,
+     * 它由自己那根写出手继续等。对端真的在读时写出是 0–1 ms 量级(实测 64 KB 帧), 所以这个数
+     * 只在撞上卡住的对端时才花得到。
+     */
+    static final long KEEP_ALIVE_WRITE_BUDGET_MS = 1000L;
 
     private final Map<String, McpSession> sessions = new ConcurrentHashMap<String, McpSession>();
     private final McpProperties properties;
@@ -55,6 +81,8 @@ public class McpSessionStore {
     private final Object keepAliveLock = new Object();
     private ScheduledExecutorService keepAliveExecutor;
     private ScheduledFuture<?> keepAliveTask;
+    /** 心跳写出用的线程池, 与上面那根计时线程分开: 一次写不出去的心跳会把所在线程占满整段阻塞时间. */
+    private volatile ExecutorService keepAliveWriterPool;
     private volatile boolean closed;
 
     public McpSessionStore(McpProperties properties) {
@@ -97,13 +125,88 @@ public class McpSessionStore {
         }
     }
 
-    /** 给每条挂着流的会话各发一个心跳注释帧. @return 收到心跳的流数, 便于测试与日志按它认账. */
+    /**
+     * 给每条挂着流的会话各发一个心跳注释帧.
+     *
+     * <p>写出是**派发**到 {@link #keepAliveWriters()} 上的, 这一拍最多只等
+     * {@link #KEEP_ALIVE_WRITE_BUDGET_MS} 那么久: 计时线程不该因为一个不读的对端而陪它一起站住,
+     * 那会让所有会话的心跳一起停(实测一台能拖住六条邻居整整 8 秒, README「#60」那一格)。
+     *
+     * @return 在预算内确实写出去的流数。还卡在某个对端上的那些不计 —— 那个客户端这一拍没收到心跳,
+     *         报"发过了"就是说谎。
+     */
     int tick() {
-        int streams = 0;
+        ExecutorService writers = keepAliveWriters();
+        if (writers == null) return 0;
+        AtomicInteger delivered = new AtomicInteger();
+        List<Future<?>> pending = new ArrayList<Future<?>>();
         for (McpSession s : new ArrayList<McpSession>(sessions.values())) {
-            streams += s.sendKeepAlive();
+            s.dispatchKeepAlive(writers, delivered, pending);
         }
-        return streams;
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(KEEP_ALIVE_WRITE_BUDGET_MS);
+        int stillWriting = 0;
+        for (Future<?> f : pending) {
+            long left = deadline - System.nanoTime();
+            if (left <= 0L) {
+                stillWriting++;                                  // 预算已花完, 后面这些一律按"还在写"记账
+                continue;
+            }
+            try {
+                f.get(left, TimeUnit.NANOSECONDS);
+            } catch (TimeoutException te) {
+                stillWriting++;
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (ExecutionException ee) {
+                // 成败由写出手自己记在 delivered 里, 走到这里说明它已经把话说过一遍了
+            }
+        }
+        if (stillWriting > 0) {
+            log.debug("keep-alive tick waited {} ms and left {} SSE stream(s) still writing",
+                    Long.valueOf(KEEP_ALIVE_WRITE_BUDGET_MS), Integer.valueOf(stillWriting));
+        }
+        return delivered.get();
+    }
+
+    /**
+     * 心跳写出用的线程池 —— 只在真有人敲 {@link #tick()} 时才建, 线程空闲 60 秒就退, 一条安静的
+     * 服务上它一根线程都不留。
+     *
+     * <p>为什么必须不止一根: {@code SseEmitter.send} 走的是阻塞式 socket 写, 一个"还连着但不再读"的
+     * 对端会把这次写卡到容器的阻塞写超时(本机实测 65 秒)。所有写出共用一根线程, 就等于一个这样的
+     * 客户端能让**全部**会话一起停止心跳, 而中间层接着按自己的空闲阈值把所有人的流掐掉 ——
+     * 一台跑掉的客户端变成一次服务级事故, 这是 #45 在服务端一侧的孪生。
+     *
+     * <p>队列刻意是 {@code SynchronousQueue}: 排不上就当场拒(并点名), 而不是让一拍的写出在队列里
+     * 堆到下一拍之后 —— 排在队列里不会让那个客户端更早收到心跳, 只会把预算花在等自己排过的队上。
+     *
+     * @return 可用的写出池; {@code null} 表示这个 store 已经 {@link #close()} 掉, 不再有心跳
+     */
+    private ExecutorService keepAliveWriters() {
+        ExecutorService pool = keepAliveWriterPool;
+        if (pool != null) return pool;
+        if (closed) return null;
+        synchronized (keepAliveLock) {
+            if (keepAliveWriterPool == null && !closed) {
+                ThreadPoolExecutor writers = new ThreadPoolExecutor(1, KEEP_ALIVE_WRITERS, 60L,
+                        TimeUnit.SECONDS, new SynchronousQueue<Runnable>(), new ThreadFactory() {
+                    private final AtomicInteger counter = new AtomicInteger();
+
+                    @Override public Thread newThread(Runnable r) {
+                        // 名字刻意不落在 z-mcp-sse-keepalive- 那个前缀上: 那个前缀在
+                        // McpSessionStreamBufferTest 里是"keep-alive-seconds 这条配置唯一的外部证据"的
+                        // 计数口径, 混进来会让那格按配置数线程的判据变成时序相关的假红。
+                        Thread t = new Thread(r, "z-mcp-sse-heartbeat-writer-" + counter.incrementAndGet());
+                        t.setDaemon(true);
+                        return t;
+                    }
+                });
+                writers.allowCoreThreadTimeOut(true);
+                keepAliveWriterPool = writers;
+            }
+            return keepAliveWriterPool;
+        }
     }
 
     /** 容器关闭时收掉心跳线程(不关的话一个 daemon 线程会跟着 JVM 走, 但会话多起来时会拖在中间层之后). */
@@ -117,6 +220,11 @@ public class McpSessionStore {
             if (keepAliveExecutor != null) {
                 keepAliveExecutor.shutdownNow();
                 keepAliveExecutor = null;
+            }
+            if (keepAliveWriterPool != null) {
+                // 卡住的写出手不会被中断解开(阻塞 socket 写要等对端或容器超时), 但关闭之后不再有新的派发给它
+                keepAliveWriterPool.shutdownNow();
+                keepAliveWriterPool = null;
             }
         }
     }
@@ -214,6 +322,12 @@ public class McpSessionStore {
         private final long createdAt;
         private final List<SseEmitter> emitters =
                 Collections.synchronizedList(new ArrayList<SseEmitter>());
+        /**
+         * 已经派出去、还没写回来的心跳流. 一条流同时只许有一次在飞 —— 上一拍还卡在某个对端上的时候
+         * 再派一拍, 除了多占一根写出手不会让那个客户端更早收到心跳(心跳是幂等的)。
+         */
+        private final Set<SseEmitter> keepAliveInFlight =
+                Collections.synchronizedSet(new HashSet<SseEmitter>());
         private final AtomicLong seq = new AtomicLong();
         /**
          * 在飞请求表: 规范化后的 JSON-RPC id → 这一次正在跑的工具调用.
@@ -282,6 +396,14 @@ public class McpSessionStore {
         /** 缓冲里现存的事件条数. 仅测试用: 这条是内存上界的唯一量具. */
         public int bufferedCount() {
             synchronized (emitters) { return buffered.size(); }
+        }
+
+        /**
+         * 现在还挂在在飞名单上的心跳流条数. 仅测试用: 它是"派出去的心跳写出有没有把旗子还回来"的
+         * 唯一量具 —— 还不回来等于那条流从此不再有心跳, 而界面上什么都看不出来。
+         */
+        int keepAliveInFlightCount() {
+            return keepAliveInFlight.size();
         }
 
         // ------------------------------------------------------------ 在飞请求
@@ -555,36 +677,76 @@ public class McpSessionStore {
         }
 
         /**
-         * 往这条会话的每条流上写一个心跳注释帧.
+         * 把这一拍的心跳按流**派发**出去: 每条流各占一个写出手任务, 谁卡住都不影响排在它前后的流。
          *
          * <p>刻意**不取事件序号、也不入缓冲**: 心跳既不是一个通知, 也就不能占掉客户端用来续传的坐标 ——
          * 否则一个安静的流会被自己的心跳推到很高的 id, 而那段 id 区间里什么都不在缓冲里,
          * 客户端按 {@code Last-Event-ID} 回来只会撞到一个没意义的 400。
          * 写出同样放在会话锁外(与 {@link #emit} 同一个理由)。
          *
-         * @return 成功写出的流数
+         * @param writers   写出手池, 见 {@link McpSessionStore#keepAliveWriters()}
+         * @param delivered 这一拍成功写出的流数; 由写出手在自己的任务里累加, 过预算后落的那次算给下一拍之前
+         * @param pending   派出去的任务, 由敲 {@link #tick()} 的那根线程按预算去等
          */
-        int sendKeepAlive() {
+        void dispatchKeepAlive(ExecutorService writers, AtomicInteger delivered, List<Future<?>> pending) {
             List<SseEmitter> copy;
             synchronized (emitters) { copy = new ArrayList<SseEmitter>(emitters); }
-            int sent = 0;
+            int skipped = 0;
+            int noWriter = 0;
             for (SseEmitter e : copy) {
+                if (!keepAliveInFlight.add(e)) {
+                    skipped++;                                   // 上一拍还在这个对端上写着: 不叠任务
+                    continue;
+                }
                 try {
-                    e.send(commentFrame(KEEP_ALIVE_COMMENT));
-                    sent++;
+                    pending.add(writers.submit(new KeepAliveWrite(e, delivered)));
+                } catch (RejectedExecutionException rex) {
+                    keepAliveInFlight.remove(e);                 // 没派出去, 旗子得还回来
+                    noWriter++;
+                }
+            }
+            if (skipped > 0) {
+                log.debug("session {} skipped {} SSE stream(s) this keep-alive beat: the previous one is still writing",
+                        getId(), Integer.valueOf(skipped));
+            }
+            if (noWriter > 0) {
+                log.warn("session {} found no free keep-alive writer for {} SSE stream(s) (all {} are waiting on a peer)",
+                        getId(), Integer.valueOf(noWriter), Integer.valueOf(KEEP_ALIVE_WRITERS));
+            }
+        }
+
+        /**
+         * 一条流的一次心跳写出. 写不出去就摘掉并闭合(与 {@link #emit} 的失败处理完全同形),
+         * 无论成败都要把在飞旗还回去 —— 还不回去就等于这条流从此不再有心跳。
+         */
+        private final class KeepAliveWrite implements Runnable {
+
+            private final SseEmitter target;
+            private final AtomicInteger delivered;
+
+            KeepAliveWrite(SseEmitter target, AtomicInteger delivered) {
+                this.target = target;
+                this.delivered = delivered;
+            }
+
+            @Override public void run() {
+                try {
+                    target.send(commentFrame(KEEP_ALIVE_COMMENT));
+                    delivered.incrementAndGet();
                 } catch (Exception ex) {
-                    emitters.remove(e);
+                    emitters.remove(target);
                     // 与 {@link #emit} 同一件事: 光把它从名单里摘掉, 那条异步请求要一直挂到容器超时.
                     log.warn("session {} dropped an SSE stream during keep-alive: {}", getId(),
                             ex.toString());
                     try {
-                        e.complete();
+                        target.complete();
                     } catch (Exception ignore) {
                         // 对端已经不在了
                     }
+                } finally {
+                    keepAliveInFlight.remove(target);
                 }
             }
-            return sent;
         }
 
         void closeEmitters() {
