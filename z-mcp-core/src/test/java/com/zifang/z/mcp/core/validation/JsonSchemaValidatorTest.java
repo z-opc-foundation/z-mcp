@@ -1124,11 +1124,20 @@ public class JsonSchemaValidatorTest {
         // {"k_a":1} 这种**四份参照同判 VALID** 的调用, 我们判的是 "unknown property 'k_a' not allowed".
         // 这不是假想组合: ref53b_py_wire.log 里 $defs.PatternBag 就是同一份文档里 extra='forbid'
         // 与内层 patternProperties 一起上线的形状, 所以修之前任何走这条路的产品调用都会被拒.
+        // 下面这几族判据原来挤在一个 @Test 里: JUnit 在第一条 assertEquals 抛出就不再往下, 于是
+        // M66 (匹配上的键不再登记进 patternCovered) 与 M67 (additionalProperties:false 那条不再看
+        // patternCovered) 这对互反变异体的红集逐字相同 —— 两支都只报这一个方法名, 判不出"改的是哪半条".
+        // 拆成一个方法一族之后: M66 该红这一支**和** additional_properties_schema_ 那一支,
+        // M67 只该红这一支. 这是 #53 记下的覆盖面欠账, 修的是判据的可分辨性, 不是判定结果.
         String s = "{\"patternProperties\":{\"^k_\":{\"type\":\"integer\"}},\"additionalProperties\":false}";
         assertOk(s, "{\"k_a\":1}");
         List<String> unmatched = errorsOf(s, "{\"k_a\":1,\"other\":2}");
         assertEquals(1, countMatches(unmatched, "unknown property 'other' not allowed"));
         assertEquals(0, countMatches(unmatched, "unknown property 'k_a'"));
+    }
+
+    @Test
+    public void additional_properties_schema_does_not_recheck_a_pattern_covered_key() throws Exception {
         // additionalProperties 是份 schema 时同理: 被盖住的键**不**再过它一遍. 两格互相反着钉:
         // 第一格若错误地双查, 1 会因不是 string 而红 (四份都判 VALID);
         // 第二格若漏了 pattern 那一支, "s" 是合法 string ⇒ 静默绿 (四份都判红, 且 jsonschema
@@ -1139,6 +1148,10 @@ public class JsonSchemaValidatorTest {
         List<String> conflict = errorsOf(apSchema, "{\"k_a\":\"s\"}");
         assertEquals(1, countMatches(conflict, "expected type integer"));
         assertEquals(0, countMatches(conflict, "expected type string"));
+    }
+
+    @Test
+    public void properties_and_pattern_properties_both_apply_to_the_same_key() throws Exception {
         // properties 与 patternProperties 对同一个键各自适用, 谁也不顶掉谁 (规范明文).
         // 两格互为反向 —— 换实例方向才分得开"两条都在跑"和"只有一条在跑":
         // {"k_a":1} 违 properties(string) 而满足 pattern(integer), {"k_a":"s"} 反过来.
@@ -1148,12 +1161,20 @@ public class JsonSchemaValidatorTest {
         assertEquals(0, countMatches(errorsOf(both, "{\"k_a\":1}"), "expected type integer"));
         assertEquals(1, countMatches(errorsOf(both, "{\"k_a\":\"s\"}"), "expected type integer"));
         assertEquals(0, countMatches(errorsOf(both, "{\"k_a\":\"s\"}"), "expected type string"));
+    }
+
+    @Test
+    public void every_matching_pattern_contributes_its_own_verdict() throws Exception {
         // 多个模式同时命中一个键 ⇒ 每个模式的判定都算 (two patterns both match 四份同判红;
         // two patterns agree 四份同判绿)
         assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"^k_\":{\"type\":\"integer\"},"
                 + "\"_a$\":{\"type\":\"string\"}}}", "{\"k_a\":1}"), "expected type string"));
         assertOk("{\"patternProperties\":{\"^k_\":{\"type\":\"integer\"},"
                 + "\"k_1$\":{\"type\":\"integer\"}}}", "{\"k_1\":1}");
+    }
+
+    @Test
+    public void required_and_pattern_properties_report_independently() throws Exception {
         // required 与它各报各的 (with required both report: 两家都是两条并列)
         List<String> withReq = errorsOf("{\"required\":[\"a\"],\"patternProperties\":"
                 + "{\"^k_\":{\"type\":\"integer\"}}}", "{\"k_a\":\"s\"}");
