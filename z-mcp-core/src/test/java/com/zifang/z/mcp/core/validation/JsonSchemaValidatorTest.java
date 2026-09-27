@@ -1235,7 +1235,9 @@ public class JsonSchemaValidatorTest {
         // 上同判红 —— 参照用的是数值比较 (ajv `must NOT have fewer than 1.5 properties` /
         // jsonschema `'a' has too many... does not have enough properties`). 规范说这两个关键字的
         // 值该是非负整数, 但"值是浮点"时参照一致而老实现静默, 所以闸放宽到 isNumber().
-        // 旁边没量过的 minItems / maxLength 那一族不跟着改 (见 checkArray / checkString).
+        // 当时旁边那一族还没量, 所以那句"不跟着改"是**知道得不够**的产物而不是决定: #54 量完
+        // (ref54_crossdiff.py 在 56 格上对拍) 后 minItems/maxItems/minLength/maxLength 同批放宽到
+        // isNumber() 并把码元数改成码点数, 见 length_bounds_follow_the_reference_isNumber_policy.
         assertEquals(1, countMatches(errorsOf("{\"minProperties\":1.5}", "{\"a\":1}"),
                 "expected at least 1.5 properties"));
         assertEquals(1, countMatches(errorsOf("{\"maxProperties\":1.5}", "{\"a\":1,\"b\":2}"),
@@ -1342,5 +1344,254 @@ public class JsonSchemaValidatorTest {
         assertOk("{\"patternProperties\":{\"^k_\":{\"type\":\"integer\"}}}", "{\"k_a\":1}");
         assertEquals(1, countMatches(errorsOf("{\"patternProperties\":{\"^k_\":{\"type\":\"integer\"}}}",
                 "{\"k_a\":\"s\"}"), "expected type integer"));
+    }
+
+    // ==================== #54: 长度关键字"怎么数"与"值不配当数字时怎么办" ====================
+    //
+    // 这一族的形状与判决全部现量, 不掺设计: 56 格网格在 ref54_cells.json (python 与 js 两份量具
+    // 读**同一枚字节**, 两日志各打 sha256[:16]=abd0a341a9057689 自证), 四份参照逐格判决在
+    // ref54_len_oracle_py.log (jsonschema 4.26.0 × 双方言) 与 tsclient/ref54_len_oracle.log
+    // (ajv 8.20.0 × 双方言), 逐格对拍在 ref54_crossdiff.py。账目 (cmp54.py 现算):
+    //   50 格四家同判 / 1 格跨实现分叉 (maxLength 的布尔值) / 5 格四家都给不出判决;
+    //   老实现在 50 格共识上只同判 27 格, 改后 50/50 —— 23 格判定移动 = 15 格假红 + 8 格假绿。
+    // 下面每支方法只管一个方向, 这样变异量能各自点名是哪一支漏了 (#53 的 M66≡M67 教训:
+    // 两个方向挤进一条方法, 红集逐字相同就等于分不开两种修法)。
+    //
+    // 三个 JSON 文本形状都是"一对转义代理项", 因为 Python 的 json.dumps 默认 ensure_ascii=True
+    // 就是这么发到线上的 (RFC 8259 §7 也专门说明 BMP 外的字符写成一对转义代理项)。
+    //
+    // 下面每一串都是**逐字写全**的, 不许用 e2 + e2.substring(1) 这种拼接凑长度: 那样得到的是
+    // "😀😀""😀😀" 两个连写的 JSON 值, 而 Jackson 默认读到第一个值就停、**不报尾随垃圾**
+    // (读数: _driver54/rest_post.log 第一行, 拼接串被解成 STRING "😀😀") —— 于是"我以为在测 4 个
+    // 码点, 其实测的是 2 个", 且这条测试会安静地绿。长度只能靠字面量, 不能靠算式。
+    // 一个 U+1F600 在 JSON 文本里的转义写法; 下面全部**只在引号内部**拼接, 所以拼出来必然是
+    // 一个字符串值 (整份文档之间拼会踩上面那条"尾随垃圾不报错")。
+    private static final String SMILE = "\\ud83d\\ude00";
+    private static final String EMOJI1 = "\"" + SMILE + "\"";                                 // 1 码点 / 2 码元
+    private static final String EMOJI2 = "\"" + SMILE + SMILE + "\"";                          // 2 / 4
+    private static final String EMOJI3 = "\"" + SMILE + SMILE + SMILE + "\"";                  // 3 / 6
+    private static final String EMOJI4 = "\"" + SMILE + SMILE + SMILE + SMILE + "\"";          // 4 / 8
+    private static final String EMOJI6 = "\"" + SMILE + SMILE + SMILE + SMILE + SMILE + SMILE + "\"";
+    private static final String FAMILY = "\"\\ud83d\\udc68\"";   // U+1F468: 1 码点 / 2 码元
+
+    @Test
+    public void upper_string_length_bound_counts_code_points_not_utf16_units() throws Exception {
+        // 假红那一半: 上界把**生产者自己收得下的载荷**判成非法。改前这里是
+        // "$: string longer than maxLength 3" (cmp54 的 false_red 清单第一格), 而四份参照同判 VALID。
+        assertOk("{\"maxLength\":3}", EMOJI3);
+        assertOk("{\"maxLength\":6}", EMOJI3);
+        assertOk("{\"maxLength\":1}", EMOJI1);
+        assertOk("{\"maxLength\":1}", FAMILY);
+        assertOk("{\"maxLength\":3}", "\"\\ud83d\\ude00ab\"");   // 1 emoji + 2 ASCII: 3 码点 / 4 码元
+        assertOk("{\"type\":\"string\",\"maxLength\":3}", EMOJI2);   // 与 type 同场时别被顶掉方向
+        // 阳性对照: 上界不是"从此不判了"。同样三格改成真超长, 必须各自红一条并带出界值。
+        assertEquals(1, countMatches(errorsOf("{\"maxLength\":3}", EMOJI4),
+                "string longer than maxLength 3"));
+        assertEquals(1, countMatches(errorsOf("{\"maxLength\":3}", "\"abcd\""),
+                "string longer than maxLength 3"));
+        assertEquals(1, countMatches(errorsOf("{\"maxLength\":0}", "\"a\""),
+                "string longer than maxLength 0"));
+        assertOk("{\"maxLength\":0}", "\"\"");
+        // BMP 内 (CJK) 改前改后同判 —— 这一格钉的是"别把修复做成只对 emoji 生效的补丁"之外的
+        // 另一头: 普通文本的既有判定不许漂。
+        assertOk("{\"maxLength\":3}", "\"\u4e2d\u6587\u6d4b\"");
+        assertEquals(1, countMatches(errorsOf("{\"maxLength\":2}", "\"\u4e2d\u6587\u6d4b\""),
+                "string longer than maxLength 2"));
+    }
+
+    @Test
+    public void lower_string_length_bound_counts_code_points_not_utf16_units() throws Exception {
+        // 假绿那一半: 下界把参照要拒的载荷放行 (改前 8 格里 minLength 独占 3 格)。
+        // "😀" 是 1 个字符, 广告「至少 2 个字符」的参数不能靠一对代理项凑数。
+        assertEquals(1, countMatches(errorsOf("{\"minLength\":2}", EMOJI1),
+                "string shorter than minLength 2"));
+        assertEquals(1, countMatches(errorsOf("{\"minLength\":2}", FAMILY),
+                "string shorter than minLength 2"));
+        assertEquals(1, countMatches(errorsOf("{\"minLength\":4}", "\"\\ud83d\\ude00ab\""),
+                "string shorter than minLength 4"));
+        // 阳性对照: 码点数够了就要过, 且等号边界含。
+        assertOk("{\"minLength\":2}", EMOJI2);
+        assertOk("{\"minLength\":1}", EMOJI1);
+        assertOk("{\"minLength\":3}", EMOJI3);
+        assertOk("{\"minLength\":3}", "\"abc\"");
+        assertEquals(1, countMatches(errorsOf("{\"minLength\":3}", "\"ab\""),
+                "string shorter than minLength 3"));
+        assertOk("{\"minLength\":0}", "\"\"");
+    }
+
+    @Test
+    public void code_point_counting_is_not_grapheme_or_normalization_counting() throws Exception {
+        // "é" 写成 e + U+0301 组合重音时是**一个字素簇、两个码点**。四份参照在这里全部按码点算:
+        // {"maxLength":1} 配 "e\u0301" INVALID、{"minLength":1} 配它 VALID —— 也就是没人做
+        // Unicode 归一化或字素簇切分 (pydantic 2.12.5 同向: ref54_len_wire.log 第 6 行
+        // REJECTED "String should have at most 1 character")。这一格**改前也同判** (码点数恰好
+        // 等于码元数), 记它是因为它是"数法"最容易被再次改错的方向: 谁哪天接了 Normalizer 或
+        // BreakIterator, 只有这格会红。
+        assertEquals(1, countMatches(errorsOf("{\"maxLength\":1}", "\"e\\u0301\""),
+                "string longer than maxLength 1"));
+        assertOk("{\"minLength\":1}", "\"e\\u0301\"");
+        assertEquals(1, countMatches(errorsOf("{\"minLength\":3}", "\"e\\u0301\""),
+                "string shorter than minLength 3"));
+        // 落单代理项 (unpaired surrogate) 在这里算 1 个码点, 与 Python 的 len() 和 ajv 的实现同;
+        // 不是"一段非法文本"。两份参照: maxLength 1 配它 VALID, minLength 2 配它 INVALID。
+        assertOk("{\"maxLength\":1}", "\"\\ud800\"");
+        assertEquals(1, countMatches(errorsOf("{\"minLength\":2}", "\"\\ud800\""),
+                "string shorter than minLength 2"));
+        // JSON 文本里"转义写法"与"裸代理项写法"必须同判 —— 否则数法就取决于线上字节怎么编码,
+        // 那不再是 schema 语义。两种写法各钉一次 (读数: _driver54/forms_post.log 的 A/B、C/D 四行,
+        // Jackson 把两者都解成同样的 java.lang.String)。
+        assertOk("{\"maxLength\":1}", "\"\ud83d\ude00\"");
+        assertOk("{\"maxLength\":1}", "\"\ud800\"");
+        assertEquals(1, countMatches(errorsOf("{\"minLength\":2}", "\"\ud83d\ude00\""),
+                "string shorter than minLength 2"));
+    }
+
+    @Test
+    public void length_bounds_reach_nested_positions_with_the_same_counting() throws Exception {
+        // 数法要跟着约束走到它被引用的每一个位置。改前这五个位置**全在 false_red 清单里**
+        // (cmp54: maxLength inside $ref target / items schema / additionalProperties schema /
+        // allOf violated / on propertyNames key / on named property / beside type string),
+        // 也就是说这不是"新加了一条能力", 而是同一处 bug 在七个入口各犯一遍。
+        // 消息原文一律抄 _driver54/more_post.log, 路径段不凭印象写。
+        assertEquals(1, countMatches(errorsOf("{\"type\":\"object\",\"properties\":{\"bag\":{\"maxLength\":1}}}",
+                "{\"bag\":" + EMOJI2 + "}"), "$.bag: string longer than maxLength 1"));
+        assertOk("{\"type\":\"object\",\"properties\":{\"bag\":{\"maxLength\":2}}}", "{\"bag\":" + EMOJI2 + "}");
+        assertEquals(1, countMatches(errorsOf("{\"type\":\"array\",\"items\":{\"maxLength\":1}}",
+                "[" + EMOJI2 + "]"), "$[0]: string longer than maxLength 1"));
+        assertOk("{\"type\":\"array\",\"items\":{\"maxLength\":2}}", "[" + EMOJI1 + "]");
+        assertEquals(1, countMatches(errorsOf("{\"additionalProperties\":{\"maxLength\":1}}",
+                "{\"outer\":" + EMOJI2 + "}"), "$.outer: string longer than maxLength 1"));
+        assertEquals(1, countMatches(errorsOf("{\"propertyNames\":{\"maxLength\":1}}",
+                "{" + EMOJI2 + ":1}"), "string longer than maxLength 1"));
+        assertOk("{\"propertyNames\":{\"maxLength\":3}}", "{" + EMOJI2 + ":1}");
+        assertEquals(1, countMatches(errorsOf(
+                "{\"$ref\":\"#/$defs/S\",\"$defs\":{\"S\":{\"maxLength\":1}}}", EMOJI2),
+                "string longer than maxLength 1"));
+        assertEquals(1, countMatches(errorsOf("{\"allOf\":[{\"minLength\":4}]}", EMOJI2),
+                "string shorter than minLength 4"));
+        // anyOf 两支都不合 → 红的是 anyOf 那条, 不该被拆成两条长度消息;
+        // 只有一支合 (另一支按 3 码点其实合) → 必须绿。
+        assertOk("{\"anyOf\":[{\"maxLength\":3},{\"type\":\"object\"}]}", EMOJI2);
+        assertEquals(1, countMatches(errorsOf("{\"anyOf\":[{\"maxLength\":1},{\"maxLength\":2}]}", EMOJI4),
+                "does not match any subschema of anyOf"));
+        // not 是"数法"最容易被读反的位置: not:{maxLength:3} 要求实例**违反**那条上界。
+        // 2 个码点满足 maxLength 3 ⇒ not 违例 (改前 4 个码元也满足⇒ 反过来放行 = false green);
+        // 4 个码点违反 maxLength 3 ⇒ not 满足。
+        assertEquals(1, countMatches(errorsOf("{\"not\":{\"maxLength\":3}}", EMOJI2),
+                "not allowed by the not subschema"));
+        assertOk("{\"not\":{\"maxLength\":3}}", EMOJI4);
+    }
+
+    @Test
+    public void length_bounds_follow_the_reference_isNumber_policy() throws Exception {
+        // 界的**值**不配当整数时该怎么办: 上一版 minItems/maxItems/minLength/maxLength 四支写的是
+        // isInt(), 于是浮点界整条不参与 ⇒ 静默放行 (false green 清单里 float/integral 那 5 格)。
+        // 四份参照在 {"maxItems":1.5} 配 [1,2] 这一格上同判红 —— 它们做的是数值比较, 不是
+        // "先要求值是整数"。规范说这两个关键字的值*该*是非负整数, 但"值带小数"时参照一致而
+        // 老实现静默, 所以闸放宽到 isNumber(), 与 #53 在 min/maxProperties 上定的口径拉平。
+        // 先问"有没有判决", 再问"判决里回显的界是什么": 两条判据合成一条断言时, "闸根本不参与"
+        // (一条红也没有) 与 "界被取整成 2 回显" 会落在同一个 (测试, 消息, 行号) 上, 单支变异
+        // 定位就把两种不同的修法读成同一种 —— 上一版正是这样, 分开后两支各自点名.
+        List<String> overLen = errorsOf("{\"maxLength\":2.5}", "\"abcd\"");
+        assertEquals("浮点界 2.5 必须参与判定: 要有一条上界违例红",
+                1, countMatches(overLen, "string longer than maxLength"));
+        assertEquals("红里回显的界要照抄 2.5, 不许取整成 2",
+                1, countMatches(overLen, "string longer than maxLength 2.5"));
+        assertOk("{\"maxLength\":2.5}", "\"ab\"");
+        assertEquals(1, countMatches(errorsOf("{\"minLength\":2.5}", "\"ab\""),
+                "string shorter than minLength 2.5"));
+        assertEquals(1, countMatches(errorsOf("{\"maxLength\":3.0}", "\"abcd\""),
+                "string longer than maxLength 3.0"));
+        assertEquals(1, countMatches(errorsOf("{\"maxItems\":1.5}", "[1,2]"),
+                "expected at most 1.5 items"));
+        assertOk("{\"minItems\":1.5}", "[1,2]");
+        // 下一格是网格的**缺口** (只有 maxItems 的违例侧 29 与 minItems 的合上侧 30 被量过),
+        // 按对称推出的立场, 不冒充参照判决.
+        assertEquals(1, countMatches(errorsOf("{\"minItems\":2.5}", "[1,2]"),
+                "expected at least 2.5 items"));
+        assertEquals(1, countMatches(errorsOf("{\"maxItems\":2.0}", "[1,2,3]"),
+                "expected at most 2.0 items"));
+        // 界为负的两格在网格里 (38 maxLength negative value、39 maxItems negative value violated),
+        // 四份参照同判 —— 上界为负连空串都违 (0 > -1), 下界为负恒合。消息原文抄 _driver54/rest_post.log。
+        assertEquals(1, countMatches(errorsOf("{\"maxLength\":-1}", "\"\""),
+                "string longer than maxLength -1"));
+        assertEquals(1, countMatches(errorsOf("{\"maxItems\":-1}", "[1]"),
+                "expected at most -1 items"));
+        // minLength 的负下界**不在网格里** (56 格只量了上界那一侧), 所以这一格是"按对称推出的立场",
+        // 不是照抄参照 —— 记在这里, 免得以后把这条当成有参照背书.
+        assertOk("{\"minLength\":-1}", "\"\"");
+        // 值根本不是数字 ⇒ 整条不参与 (#51/#52/#53 同一条 house rule)。这一族里字符串与 null
+        // 那 5 格四家**都给不出判决** (ajv 编译期抛 `maxLength value must be ["number"]`、
+        // jsonschema 比较时 TypeError), 布尔那 1 格是本轮网格里唯一的跨实现分叉 (ajv 抛、
+        // jsonschema 把 True 当 1 判 INVALID) ⇒ 没有共识可抄, 只能定立场并写清楚。
+        assertOk("{\"maxLength\":\"3\"}", "\"abcd\"");
+        assertOk("{\"minLength\":\"2\"}", "\"a\"");
+        assertOk("{\"maxItems\":\"1\"}", "[1,2]");
+        assertOk("{\"maxLength\":null}", "\"abcd\"");
+        assertOk("{\"maxItems\":null}", "[1]");
+        assertOk("{\"maxLength\":true}", "\"abcd\"");
+        assertOk("{\"maxItems\":false}", "[1]");
+        // 阳性对照: 上面每一格的红都在"写法配当数字"时回来, 免得把"不参与"读成"上界整条坏了"。
+        assertEquals(1, countMatches(errorsOf("{\"maxLength\":3}", "\"abcd\""),
+                "string longer than maxLength 3"));
+        assertEquals(1, countMatches(errorsOf("{\"maxItems\":1}", "[1,2]"),
+                "expected at most 1 items"));
+        // 非字符串/非数组实例上这四支不参与 (21–25 五格四家同判 VALID)。
+        assertOk("{\"maxLength\":1}", "5");
+        assertOk("{\"maxLength\":0}", "[1,2,3]");
+        assertOk("{\"maxLength\":0}", "null");
+        assertOk("{\"maxItems\":0}", "\"abc\"");
+        assertOk("{\"minItems\":5}", "{\"a\":1}");
+    }
+
+    @Test
+    public void producer_wire_schemas_with_emoji_payload_validate_like_the_refs() throws Exception {
+        // 下面三份 schema 是 ref54_len_wire.log 第 46–61 行**照抄**的字节 (官方 python SDK 1.27.1
+        // + pydantic 2.12.5 跑真 FastMCP.list_tools() 现读的 inputSchema), 不是我为测试编的形状:
+        //   str_min_max   = Annotated[str, StringConstraints(min_length=2, max_length=5)]
+        //   list_of_...   = List[Annotated[str, StringConstraints(max_length=2)]]
+        //   dict_of_...   = Dict[str, Annotated[str, StringConstraints(max_length=2)]]
+        // 计数: 13 个真实形状里 maxLength 出现 7 次、minLength 3 次、minItems/maxItems 各 3 次,
+        // 而 NON_INTEGER_BOUND_ON_WIRE=0 (pydantic 对 2.5 / 3.5 / "2" / -1 一律 SchemaError) ⇒
+        // 上面那批 isNumber 格是"与参照同判", 不是给畸形 schema 开后门; 而这三支码点格是**线上
+        // 真会打到的**假红: 改前 pydantic 自己收得下的载荷, 我们拒 (false_red 清单最后三格)。
+        String strMinMax = "{\"properties\":{\"bag\":{\"maxLength\":5,\"minLength\":2,\"title\":\"Bag\","
+                + "\"type\":\"string\"}},\"required\":[\"bag\"],\"title\":\"fn_str_min_maxArguments\","
+                + "\"type\":\"object\"}";
+        assertOk(strMinMax, "{\"bag\":" + EMOJI3 + "}");            // 3 码点 / 6 码元: 生产者侧 ACCEPTED
+        assertOk(strMinMax, "{\"bag\":" + EMOJI4 + "}");            // 4 码点 / 8 码元: 改前在这里判红
+        assertEquals(1, countMatches(errorsOf(strMinMax, "{\"bag\":" + EMOJI1 + "}"),
+                "$.bag: string shorter than minLength 2"));
+        assertEquals(1, countMatches(errorsOf(strMinMax, "{\"bag\":" + EMOJI6 + "}"),
+                "$.bag: string longer than maxLength 5"));
+        String listConstr = "{\"properties\":{\"bag\":{\"items\":{\"maxLength\":2,\"type\":\"string\"},"
+                + "\"title\":\"Bag\",\"type\":\"array\"}},\"required\":[\"bag\"],"
+                + "\"title\":\"fn_list_of_constrained_strArguments\",\"type\":\"object\"}";
+        assertOk(listConstr, "{\"bag\":[" + EMOJI2 + "]}");
+        assertEquals(1, countMatches(errorsOf(listConstr, "{\"bag\":[" + EMOJI4 + "]}"),
+                "string longer than maxLength 2"));
+        String dictConstr = "{\"properties\":{\"bag\":{\"additionalProperties\":{\"maxLength\":2,"
+                + "\"type\":\"string\"},\"title\":\"Bag\",\"type\":\"object\"}},\"required\":[\"bag\"],"
+                + "\"title\":\"fn_dict_of_constrained_strArguments\",\"type\":\"object\"}";
+        assertOk(dictConstr, "{\"bag\":{\"outer\":" + EMOJI2 + "}}");
+        assertEquals(1, countMatches(errorsOf(dictConstr, "{\"bag\":{\"outer\":" + EMOJI4 + "}}"),
+                "string longer than maxLength 2"));
+        // 数组侧的真实形状 (list_min_max / set_min_max) 顺带钉一次: 整数界 + 违例方向都在。
+        String listMinMax = "{\"items\":{\"type\":\"integer\"},\"maxItems\":3,\"minItems\":1,\"type\":\"array\"}";
+        assertOk(listMinMax, "[1,2]");
+        assertOk(listMinMax, "[1]");
+        assertOk(listMinMax, "[1,2,3]");   // 恰好等于上界要过 (">" 写成 ">=" 只有这一格会红)
+        assertEquals(1, countMatches(errorsOf(listMinMax, "[]"), "expected at least 1 items"));
+        assertEquals(1, countMatches(errorsOf(listMinMax, "[1,2,3,4]"), "expected at most 3 items"));
+        String setMinMax = "{\"items\":{\"type\":\"integer\"},\"maxItems\":3,\"minItems\":1,"
+                + "\"type\":\"array\",\"uniqueItems\":true}";
+        List<String> bothWays = errorsOf(setMinMax, "[1,2,3,4]");
+        assertEquals(1, countMatches(bothWays, "expected at most 3 items"));   // 只违上界
+        assertEquals(0, countMatches(bothWays, "expected at least 1 items"));
+        // 一条实例同时违两条闸时, 两条都要在 (互异那条的消息原文抄 _driver54/rest_post.log:
+        // "items ## 0 and 1 are identical but uniqueItems is true")。
+        List<String> dupAndLong = errorsOf(setMinMax, "[1,1,1,1]");
+        assertEquals(1, countMatches(dupAndLong, "expected at most 3 items"));
+        assertEquals(1, countMatches(dupAndLong, "are identical but uniqueItems is true"));
     }
 }

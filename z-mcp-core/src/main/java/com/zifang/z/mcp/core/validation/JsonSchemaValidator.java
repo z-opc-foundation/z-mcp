@@ -69,6 +69,20 @@ import java.util.regex.PatternSyntaxException;
  * ref51_crossdiff.py 现算 —— 跨实现、同方言的 94 格里只有 draft-04 布尔写法那 2 格分叉,
  * 而那 2 格是"参照自己不同意"的地方, 立场写在 checkNumber 的注释里.
  *
+ * <p>长度的"数法"比关键字本身更容易悄悄错: minLength / maxLength 原先拿 {@code String.length()}
+ * 量, 那是 UTF-16 **码元**数而不是字符数, 于是一个 emoji 算 2 个. 规范两版措辞一致地指向 RFC 8259
+ * 的"字符", 而其 ABNF 里一个字符取值到 %x10FFFF = 一个码点 (§7 另注明 BMP 外的字符写成一对转义代理项)
+ * ⇒ 该数码点. 四份参照在这一点上**逐格同判** (56 格网格 ref54_cells.json, 判决
+ * ref54_len_oracle_py.log 与 tsclient/ref54_len_oracle.log, 对拍 ref54_crossdiff.py: 50 格共识 +
+ * 只有 1 格跨实现分叉 + 5 格无判决), 所以这一条是照抄共识而不是选边. 改前后同一把尺的读数:
+ * 与共识同判从 <b>27/50</b> 抬到 <b>50/50</b>, 23 格判定移动 —— 15 格假红 (把生产者自己收得下的载荷
+ * 拒掉) + 8 格假绿, 红格总数 26 → 19. 同一轮把 minItems / maxItems 的 {@code isInt()} 闸放宽到
+ * {@code isNumber()}, 与 #53 在 min/maxProperties 上定的口径拉平 (四份参照对 {"maxItems":1.5} 配
+ * [1,2] 同判红, 老实现在那一格静默). 生产者侧的分量: ref54_len_wire.log 里 maxLength 在 13 个真实
+ * FastMCP 形状中出现 7 次、minLength 3 次, 而<b>没有任何</b>生产者交得出非整数界
+ * (NON_INTEGER_BOUND_ON_WIRE=0 —— pydantic 对 2.5 / 3.5 / "2" / -1 一律 SchemaError), 所以放宽闸是
+ * "与参照同判"而不是"给畸形 schema 开后门"; 值不配当数字时仍整条不参与 (#51 那条政策).
+ *
  * <p>后一组不是"顺手做的完备性": 两份官方 SDK 生成的 schema 主要约束就住在里面.
  * python SDK 1.27.1 + pydantic 2 把嵌套模型交成
  * {"$defs":{"M":{...}}, "properties":{"p":{"$ref":"#/$defs/M"}}}、把联合类型交成 anyOf
@@ -441,7 +455,9 @@ public class JsonSchemaValidator {
         // 但**是数字就得参与**, 包括非整数: 上一版这里是 isInt(), 于是 {"minProperties":1.5} 遇
         // {"a":1} 被判成"不参与"⇒ 绿, 而四份参照在这格上同判红 (minProperties float value:
         // ajv 与 jsonschema 都按 1 < 1.5 算). 这一族的参照用的是数值比较而不是整数比较, 所以闸放成
-        // isNumber() + 比 double. 旁边的 minItems / maxLength 那一族本轮没量过, 不跟着改.
+        // isNumber() + 比 double. 当时"旁边的 minItems / maxLength 那一族没量过, 不跟着改"这句
+        // 只写了半天 —— #54 把那一族量了 (56 格网格) 并且**同样**放宽了闸, 因为四份参照在
+        // {"maxItems":1.5} 配 [1,2] 上也是同判红; 见 checkArray / checkString.
         if (minProps != null && minProps.isNumber() && node.size() < minProps.asDouble()) {
             errors.add(path + ": expected at least " + literal(minProps) + " properties");
         }
@@ -454,12 +470,19 @@ public class JsonSchemaValidator {
     private void checkArray(JsonNode schema, JsonNode node, String path, Ctx ctx,
                             List<String> errors) {
         JsonNode minItems = schema.get("minItems");
-        if (minItems != null && minItems.isInt() && node.size() < minItems.asInt()) {
-            errors.add(path + ": expected at least " + minItems.asInt() + " items");
+        // 与 #53 在 min/maxProperties 上定的口径拉平: 这一族两支上一版写的都是 isInt(), 于是
+        // {"maxItems":1.5} 遇 [1,2] 被判成"值不配当整数所以不参与"⇒ 绿, 而四份参照在这一格同判红
+        // (网格第 29 格 maxItems float value violated side: ajv 与 jsonschema 都按数值比较算 2 > 1.5)。
+        // 两支一起放宽是因为它们是同一条政策的对称面; 但要写清楚**量到的边界**: 56 格里带小数的
+        // 下界只有 minItems 的"合上侧" (第 30 格 VALID) 与 minLength 的"违例侧" (第 28 格),
+        // 而 {"minItems":2.5} 遇 [1,2] 这一格没进网格 ⇒ 那一支的判定是我们的立场, 不是照抄.
+        // 值不配当数字时仍不参与 (#51 那条政策; 生产者交不出这种界, 见 ref54_len_wire.log B 段)。
+        if (minItems != null && minItems.isNumber() && node.size() < minItems.asDouble()) {
+            errors.add(path + ": expected at least " + literal(minItems) + " items");
         }
         JsonNode maxItems = schema.get("maxItems");
-        if (maxItems != null && maxItems.isInt() && node.size() > maxItems.asInt()) {
-            errors.add(path + ": expected at most " + maxItems.asInt() + " items");
+        if (maxItems != null && maxItems.isNumber() && node.size() > maxItems.asDouble()) {
+            errors.add(path + ": expected at most " + literal(maxItems) + " items");
         }
         JsonNode uniqueItems = schema.get("uniqueItems");
         // 放在 items / prefixItems 那几支的 return **之前**: 互异与位置约束无关。"位置子 schema 里
@@ -553,13 +576,16 @@ public class JsonSchemaValidator {
 
     private void checkString(JsonNode schema, JsonNode node, String path, List<String> errors) {
         String s = node.asText();
+        // 数的是**码点**, 不是 java.lang.String.length() 那个 UTF-16 码元数 (理由与四份参照的逐格
+        // 同判见 codePointLength 的注释)。
+        int len = codePointLength(s);
         JsonNode minLen = schema.get("minLength");
-        if (minLen != null && minLen.isInt() && s.length() < minLen.asInt()) {
-            errors.add(path + ": string shorter than minLength " + minLen.asInt());
+        if (minLen != null && minLen.isNumber() && len < minLen.asDouble()) {
+            errors.add(path + ": string shorter than minLength " + literal(minLen));
         }
         JsonNode maxLen = schema.get("maxLength");
-        if (maxLen != null && maxLen.isInt() && s.length() > maxLen.asInt()) {
-            errors.add(path + ": string longer than maxLength " + maxLen.asInt());
+        if (maxLen != null && maxLen.isNumber() && len > maxLen.asDouble()) {
+            errors.add(path + ": string longer than maxLength " + literal(maxLen));
         }
         JsonNode pattern = schema.get("pattern");
         if (pattern != null && pattern.isTextual()) {
@@ -725,5 +751,25 @@ public class JsonSchemaValidator {
     private static String literal(JsonNode node) {
         if (node == null) return "null";
         return node.isTextual() ? "'" + node.asText() + "'" : node.toString();
+    }
+
+    /** minLength / maxLength 的"长度" = RFC 8259 意义上的字符数, 一个字符 = 一个 Unicode 码点.
+     *
+     * <p>规范两版措辞一致 (draft-07 §6.3 与 2020-12 §6.3.1 都写作 "the number of its characters as
+     * defined by RFC 7159/8259"), 而 RFC 8259 §2 的 ABNF 里 {@code unescaped} 取值到 %x10FFFF ——
+     * 语法符号是码点, BMP 之外的那一个字符在 JSON 文本里写成**一对**被转义的代理项 (§7)。
+     *
+     * <p>四份参照在这一条上**逐格同判**, 所以这不是"选边"而是照抄共识 (56 格网格见
+     * ref54_cells.json, 判决在 ref54_len_oracle.log 与 ref54_len_oracle_py.log):
+     * {"maxLength":3} 遇三个 emoji (3 码点 / 6 码元) 全 VALID, {"minLength":2} 遇一个 emoji 全
+     * INVALID。而 java.lang.String.length() 数的是码元 ⇒ 上一版两个方向都反: 上界把生产者自己
+     * 收得下的载荷判成非法 (假红, 且 pydantic 2.12.5 真交得出这种 schema ——
+     * ref54_len_wire.log 的 maxLength=7 那批形状里), 下界把它拒收的载荷放行 (假绿)。
+     *
+     * <p>码点这一侧还有个附带的读数: 落单的代理项在这里算 1 (与 Python 的 len() 与 ajv 的实现同),
+     * 而不是"一段非法文本"。
+     */
+    private static int codePointLength(String s) {
+        return s.codePointCount(0, s.length());
     }
 }
