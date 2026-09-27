@@ -2,6 +2,9 @@ package com.zifang.z.mcp.core.client;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.zifang.z.mcp.api.exception.McpException;
+import com.zifang.z.mcp.core.protocol.McpSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,6 +30,10 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>读侧用独立线程**按 id 派发**, 而不是"顺序读到 id 匹配的那行为止": 上游会在两次响应
  * 之间插通知(notifications/*), 顺序读会把请求错配或直接读死.
+ *
+ * <p>读侧还有一条反过来的责任: 上游也可以向我们**发请求**(ping、或我们广告了 roots 之后
+ * 的 roots/list), 而在这条链路上我们是 client —— 不该答的要闭嘴, 该答的一句都不能拖,
+ * 见 {@link #answerIfRequest}.
  */
 public final class StdioJsonRpcExchange implements JsonRpcExchange, Closeable {
 
@@ -197,14 +204,61 @@ public final class StdioJsonRpcExchange implements JsonRpcExchange, Closeable {
             log.debug("discarding non-JSON line from stdio server: {}", trimmed);
             return;
         }
+        // 先按"有没有 method"分流, 而不是先按"有没有在等的 id" —— 后者会把上游推来的**请求**
+        // 一并归进"没人认领的响应"那一格, 于是这一条链路永远回不了话(见 answerIfRequest).
+        JsonNode method = node.get("method");
+        if (method != null && !method.isNull()) {
+            answerIfRequest(node, method.asText());
+            return;
+        }
         JsonNode id = node.get("id");
-        if (id == null || !id.canConvertToLong()) return;      // 服务端推的通知, 无人等
+        if (id == null || !id.canConvertToLong()) return;      // 通知帧: 没人等, 也不需要有人等
         Awaiter awaiter = pending.remove(id.asLong());
         if (awaiter == null) {
             log.debug("stdio server sent an unsolicited response id={}", id);
             return;
         }
         awaiter.complete(trimmed);
+    }
+
+    /**
+     * 上游反过来向我们发请求. hub 在这条链路上是 client, 所以"接不接受得了"要由**我们**回答,
+     * 不能靠沉默: 单线程的本地 server(filesystem / git 那一类)推完就阻塞在下一口读上,
+     * 它不回答我们, 不是因为不想, 是因为它还在等我们.
+     *
+     * <ul>
+     *   <li>{@code ping} —— 协议规定被 ping 的一方 MUST 回一个空 result.</li>
+     *   <li>其余方法(例如我们广告了 {@code roots} 能力, 上游就有权问 {@code roots/list}) ——
+     *       回 {@code -32601 Method not found}, 与参照实现 {@code Protocol._onrequest} 的做法一致:
+     *       对端当场就能继续干活, 而且知道是哪条路走不通, 而不是白等一整个它的超时.</li>
+     *   <li>没有 id 的帧是通知, 无从应答, 也不该编一个 id 出来.</li>
+     * </ul>
+     *
+     * <p>id 原样回显(数字或字符串都可能), 整个回执用 ObjectNode 组而不是拼字符串 ——
+     * 方法名来自对端, 拼进 JSON 就是让人往管道里塞引号的机会.
+     */
+    private void answerIfRequest(JsonNode frame, String method) {
+        JsonNode id = frame.get("id");
+        if (id == null || id.isNull()) return;
+        ObjectNode reply = mapper.createObjectNode();
+        reply.put("jsonrpc", "2.0");
+        reply.set("id", id);
+        if (McpSchema.M_PING.equals(method)) {
+            reply.putObject("result");
+            log.debug("answered stdio server's ping (id={})", id);
+        } else {
+            ObjectNode error = reply.putObject("error");
+            error.put("code", Integer.valueOf(McpException.METHOD_NOT_FOUND));
+            error.put("message", "Method not found: the z-mcp client side does not implement " + method);
+            log.info("stdio server asked for {} which this client does not implement; answered {}",
+                    method, "JSON-RPC " + McpException.METHOD_NOT_FOUND);
+        }
+        try {
+            writeln(mapper.writeValueAsString(reply));
+        } catch (IOException e) {
+            closed = true;
+            log.debug("cannot answer stdio server's request {}: {}", method, e.getMessage());
+        }
     }
 
     private void watchExit() {

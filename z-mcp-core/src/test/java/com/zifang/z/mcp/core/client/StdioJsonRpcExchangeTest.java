@@ -129,6 +129,83 @@ public class StdioJsonRpcExchangeTest {
         }
     }
 
+    // ------------------------------------------------------------------ 上游反过来请求
+
+    /**
+     * 上游推一条 {@code ping} 过来. 协议规定被 ping 的一方 MUST 回一个空 result ——
+     * 而这条链路里"被 ping 的一方"是我们自己(hub 是客户端).
+     *
+     * <p>fixture 推完就阻塞在 {@code readLine()} 上, 所以这一条不是在测"日志好看不好看":
+     * 不回答, 孩子就连读带写一起停住, 我们那条 {@code push_then_wait} 自己也永远拿不到回答.
+     */
+    @Test
+    public void a_ping_pushed_by_the_upstream_gets_an_empty_result() throws Exception {
+        StdioJsonRpcExchange exchange = open(6_000L);
+        try {
+            JsonRpcExchange.Response res = exchange.post(
+                    request(20, "push_then_wait",
+                            "{\"pushId\":700001,\"pushMethod\":\"ping\"}"), null);
+            String body = res.body();
+            assertTrue("配错了 id: " + body, body.contains("\"id\":20"));
+            assertTrue(body, body.contains("\"pushed\":\"ping\""));
+            assertTrue("没把回执挂在它问的那个 id 上: " + body, body.contains("\"id\":700001"));
+            assertTrue("ping 要回空 result: " + body, body.contains("\"result\":{}"));
+            assertFalse("ping 不该回错误帧: " + body, body.contains("\"error\""));
+        } finally {
+            exchange.close();
+        }
+    }
+
+    /**
+     * 上游推一条我们做不了的请求(广告了 {@code roots} 能力, 协议上它就有权问).
+     *
+     * <p>参照实现不是"没 handler 就闭嘴": TS SDK 的 {@code Protocol._onrequest} 对找不到
+     * handler 的请求立刻回 {@code -32601 Method not found}. 差别是实打实的 —— 静默让对端
+     * 一直等到它自己的超时, 而回一个错它当场就能继续干活(并且知道这条路走不通).
+     */
+    @Test
+    public void a_request_we_cannot_fulfil_is_answered_method_not_found() throws Exception {
+        StdioJsonRpcExchange exchange = open(6_000L);
+        try {
+            JsonRpcExchange.Response res = exchange.post(
+                    request(21, "push_then_wait",
+                            "{\"pushId\":700002,\"pushMethod\":\"roots/list\"}"), null);
+            String body = res.body();
+            assertTrue(body, body.contains("\"pushed\":\"roots/list\""));
+            assertTrue("没回 -32601: " + body, body.contains("-32601"));
+            assertTrue("没挂到它问的 id 上: " + body, body.contains("\"id\":700002"));
+            assertTrue("消息里要点名是哪个方法, 否则对端只知道\"不行\"不知道\"哪儿不行\": " + body,
+                    body.contains("roots/list"));
+        } finally {
+            exchange.close();
+        }
+    }
+
+    /**
+     * 反过来的一半: **不是请求的帧一条都不许回**. 上游会插通知(没 id)也会插一条没人等的响应
+     * (有 id 没 method) —— 两种都不该换来我们写进行的一行.
+     *
+     * <p>这是一条负向断言, 它的猎物和判据同等重要: 把判据写成"凡是有 id 就答一句"的用例 1/2
+     * 照样全绿, 而这条会红(fixture 会把收到的那一行原样记账带回来). 光有前两条不构成守卫.
+     */
+    @Test
+    public void the_client_never_answers_a_frame_that_is_not_a_request() throws Exception {
+        StdioJsonRpcExchange exchange = open(6_000L);
+        try {
+            // fixture 在这里推一条 notifications/message(有 method, 没 id)
+            exchange.post(request(1, "initialize", "{}"), null);
+            // fixture 在这里推一条 id=99990001 的响应(有 id, 没 method), 然后正常回答我们
+            JsonRpcExchange.Response ooo = exchange.post(request(2, "out_of_order", null), null);
+            assertTrue(ooo.body(), ooo.body().contains("\"id\":2"));
+
+            JsonRpcExchange.Response report = exchange.post(request(3, "report_spurious", null), null);
+            assertTrue("孩子没向我们发过请求, 却收到了一句回答: " + report.body(),
+                    report.body().contains("\"spurious\":null"));
+        } finally {
+            exchange.close();
+        }
+    }
+
     // ------------------------------------------------------------------ 管道与死亡
 
     @Test
