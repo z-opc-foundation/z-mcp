@@ -592,11 +592,14 @@ public class JsonSchemaValidatorTest {
     // 期望值来自盘上两份参照 × 各两种方言的逐格读数:
     //   ajv 8.20.0        tsclient/ref50_const_oracle.log (27 格, 含自检: 全 VALID 当场 FATAL)
     //   jsonschema 4.26.0 ref50_const_oracle_py.log       (31 格, 同一条闸)
-    // 共有的 54 格 (27 × 两方言) 判类逐格相同: 对象与键序无关、数组与次序有关、1 不等于 true、
-    // 0 不等于 False、1 与 1.0 同值 —— 也就是说与 enum 用的是同一套 JSON 相等.
+    // 共有的 54 格 (跨实现、同方言, 27 × 两方言) 判类逐格相同: 对象与键序无关、数组与次序有关、
+    // 1 不等于 true、0 不等于 False、1 与 1.0 同值 —— 也就是说与 enum 用的是同一套 JSON 相等.
+    // 这个"54"不是手抄的: ref50_crossdiff.py 从上面两份日志现算, 打印
+    // CROSS_IMPL_SAME_DIALECT shared=54 divergent=0, 分叉即 FATAL (拿一支改判类的假日志验过它会红).
     // py 那侧多出的 4 格是 JS 里量不出差别的 (1 与 1.0、False 与 0 在 JS 里就是同一个值).
-    // 唯一分叉还是 draft-07 的元组写法在 2020-12 参照下编译不过 (ajv 抛 / jsonschema AttributeError),
-    // #49 已记过, 这里不重复.
+    // 交集里唯一的分叉是 prefixItems 那一格, 而它是**方言差**不是实现差: draft-07 的两份参照都
+    // 不认这个关键字 (VALID), 2020-12 的两份都认 (RED) ⇒ 与 draft-07 元组写法那处分叉同族,
+    // #49 已记过政策 ("认得就管"), 这里不重复.
     // =====================================================================
 
     @Test

@@ -119,8 +119,12 @@ public class JsonSchemaValidator {
         }
         // const 与 enum 是两条独立关键字, 用的是同一套 JSON 相等 (1 与 1.0 同值, 而 1 不等于 true、
         // 0 不等于 False, 对象与键序无关而数组与次序有关). 真值: ajv 8.20.0 的 27 格 × 双方言
-        // 与 jsonschema 4.26.0 的 31 格 × 双方言, 共有的 54 格判类逐格相同
-        // (tsclient/ref50_const_oracle.log 与 ref50_const_oracle_py.log).
+        // 与 jsonschema 4.26.0 的 31 格 × 双方言 (tsclient/ref50_const_oracle.log 与
+        // ref50_const_oracle_py.log). "跨实现、同方言"那 54 对判类逐格相同这一句有自己的尺:
+        // ref50_crossdiff.py 现算并打印 CROSS_IMPL_SAME_DIALECT shared=54 divergent=0, 一旦分叉
+        // 它当场 FATAL —— 文档里的手写数字没有尺读过就不算读数.
+        // 四方向交集里唯一的分叉是 prefixItems 那一格 (draft-07 不认这个关键字 ⇒ VALID; 2020-12 认
+        // ⇒ RED): 那是**方言差**不是实现差, 我们按 #49 立下的"认得就管"站 2020-12 那一侧.
         // 排在 type 那条提前 return **之前**: 参照在两支都不合时交两条违规 ("must be string |
         // must be equal to constant"), 排后面就再也问不到常量. {"const":null} 也照样参与判定 ——
         // 实测 has() 对显式 null 返回 true, 所以这里取 get() 不为绕 has(), 只是少一次查找.
