@@ -1594,4 +1594,49 @@ public class JsonSchemaValidatorTest {
         assertEquals(1, countMatches(dupAndLong, "expected at most 3 items"));
         assertEquals(1, countMatches(dupAndLong, "are identical but uniqueItems is true"));
     }
+
+    @Test
+    public void format_is_an_annotation_and_must_not_change_a_sibling_verdict() throws Exception {
+        // `format` 在 JsonSchemaValidator 里一个字节都不读 —— checkString 只有 minLength /
+        // maxLength / pattern 三支。这一格钉的不是"现在没实现"，而是"以后也不许实现成断言"：
+        // 四份参照在这里是同向的 (ajv 8.20.0 两方言各写一行 `propertyNames format does not
+        // assert => VALID`，并在 stdout 上自报 unknown format "date" ignored in schema at path
+        // "#/propertyNames"，见 tsclient/ref53_object_oracle.log)。zod 那一路连值都不是标准
+        // 格式名 (tsclient/ref53_zod_wire.log: unknown format "starts_with" ignored) ⇒ 谁按
+        // "已知格式表"去实现，第一步就撞上一个不在表里的字符串，而线上确实发得出这种值。
+        // 补这一格之前，全仓只有 1 条判据沾着这个政策 (propertyNames_checks_the_key_itself_
+        // not_the_value 里那一句)，string 节点上一格没有 —— 也就是"顺手把 date 校验加上"这样
+        // 一个改动 today 不会让任何门禁变红，而它会把参照侧完全合法的调用判成非法。
+        assertOk("{\"type\":\"string\",\"format\":\"date\"}", "\"not-a-date\"");
+        assertOk("{\"format\":\"uuid4\"}", "\"obviously-not-a-uuid\"");
+        assertOk("{\"type\":\"string\",\"format\":\"date-time\"}", "\"yesterday\"");
+        assertOk("{\"type\":\"string\",\"format\":\"email\"}", "\"not an email\"");
+        assertOk("{\"type\":\"string\",\"format\":\"uri\"}", "\"::not a uri::\"");
+        assertOk("{\"type\":\"string\",\"format\":\"time\"}", "\"25:99:99\"");
+        assertOk("{\"type\":\"string\",\"format\":\"starts_with\"}", "\"hello\"");
+        // 值是"本身不合法的正则"时也不许去编译它：参照不判红，我们连编译异常都不该有。
+        assertOk("{\"type\":\"string\",\"format\":\"regex\"}", "\"[\"");
+
+        // 上面 8 条全是**否定式**，所以每一条都要有"这个节点确实被走到了"的正面对照，否则
+        // "checkString 压根没执行"会长得跟这里一模一样绿。对照的形状：同一节点上并置一条
+        // 真会红的约束，红必须恰好一条且点名的是它 —— 数量对 (1) 才证明 format 没另加一条，
+        // 内容对 (maxLength) 才证明节点被访问。
+        List<String> withBound = errorsOf(
+                "{\"type\":\"string\",\"format\":\"date\",\"maxLength\":4}", "\"2026-09-27\"");
+        assertEquals("format 在场时同节点的真约束一条都不许多: " + withBound, 1, withBound.size());
+        assertEquals(1, countMatches(withBound, "string longer than maxLength 4"));
+        List<String> withEnum = errorsOf(
+                "{\"type\":\"string\",\"format\":\"date\",\"enum\":[\"2026-01-01\"]}", "\"2026-09-27\"");
+        assertEquals(1, withEnum.size());
+        assertFalse("红必须来自 enum 而不是 format: " + withEnum, withEnum.get(0).contains("format"));
+        assertEquals(1, countMatches(withEnum, "not in enum"));
+
+        // 键名侧另一半: wire 上真发出来的第二个值 uuid4 (date 那一半在 :1196)，以及
+        // ref53b_py_wire.log 第 16 行那份**原样**文档 —— 两个键一个都不许红。
+        assertOk("{\"propertyNames\":{\"format\":\"uuid4\"}}", "{\"obviously-not-a-uuid\":1}");
+        assertOk("{\"properties\":{\"bag\":{\"additionalProperties\":{\"type\":\"integer\"},"
+                        + "\"propertyNames\":{\"format\":\"date\"},\"title\":\"Bag\",\"type\":\"object\"}},"
+                        + "\"required\":[\"bag\"],\"title\":\"fn_99174907Arguments\",\"type\":\"object\"}",
+                "{\"bag\":{\"not-a-date\":1,\"2026-09-27\":2}}");
+    }
 }
