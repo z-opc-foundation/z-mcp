@@ -797,6 +797,62 @@ public class McpProtocolHandler {
                 throw McpException.invalidParams("prompt " + prompt + " message " + i
                         + " content is not a typed content block");
             }
+            checkContentBranch(prompt, i, (Map<?, ?>) content);
+        }
+    }
+
+    /**
+     * #66: "type 是一个字符串"只说明它是<b>某个</b>块, 不说明它属于规范那五支中的哪一支,
+     * 而客户端按支判: 一条不达支的消息让整份 GetPromptResult 一起消失.
+     *
+     * <p>五支的 required 逐条现读 2025-06-18 那份 schema: text ['text','type'] /
+     * image ['data','mimeType','type'] / audio 同 image / resource_link ['name','type','uri'] /
+     * resource ['resource','type'], 里层是 TextResourceContents ['text','uri'] 或
+     * BlobResourceContents ['blob','uri'](两支任一命中即可, 同时带 text 与 blob 官方放行).
+     *
+     * <p>这里只查"必填字段在不在、是不是字符串", 不查多余字段、也不查字段取值:
+     * 实测两条官方腿对多余字段都容忍, 闸门比客户端严的那一半没有证据支撑.
+     */
+    private static void checkContentBranch(String prompt, int i, Map<?, ?> c) {
+        String type = (String) c.get("type");
+        if ("text".equals(type)) {
+            requireWireString(prompt, i, "content of type \"text\" needs a string field \"text\"",
+                    c.get("text"));
+        } else if ("image".equals(type) || "audio".equals(type)) {
+            requireWireString(prompt, i, "content of type \"" + type
+                    + "\" needs a string field \"data\"", c.get("data"));
+            requireWireString(prompt, i, "content of type \"" + type
+                    + "\" needs a string field \"mimeType\"", c.get("mimeType"));
+        } else if ("resource_link".equals(type)) {
+            requireWireString(prompt, i, "content of type \"resource_link\" needs a string field \"name\"",
+                    c.get("name"));
+            requireWireString(prompt, i, "content of type \"resource_link\" needs a string field \"uri\"",
+                    c.get("uri"));
+        } else if ("resource".equals(type)) {
+            Object inner = c.get("resource");
+            if (!(inner instanceof Map)) {
+                throw McpException.invalidParams("prompt " + prompt + " message " + i
+                        + " content of type \"resource\" needs an object field \"resource\"");
+            }
+            Map<?, ?> r = (Map<?, ?>) inner;
+            requireWireString(prompt, i,
+                    "content of type \"resource\" needs a string field \"uri\" inside \"resource\"",
+                    r.get("uri"));
+            if (!(r.get("text") instanceof String) && !(r.get("blob") instanceof String)) {
+                throw McpException.invalidParams("prompt " + prompt + " message " + i
+                        + " content of type \"resource\" needs either a string \"text\" or a string"
+                        + " \"blob\" inside \"resource\"");
+            }
+        } else {
+            throw McpException.invalidParams("prompt " + prompt + " message " + i
+                    + " content type \"" + type + "\" is not one of"
+                    + " text|image|audio|resource_link|resource");
+        }
+    }
+
+    private static void requireWireString(String prompt, int i, String what, Object v) {
+        if (!(v instanceof String)) {
+            throw McpException.invalidParams("prompt " + prompt + " message " + i + " " + what);
         }
     }
 

@@ -1395,6 +1395,161 @@ public class McpProtocolHandlerTest {
         assertEquals(messages, wire);
     }
 
+    /**
+     * #66: 上一道闸只查到"`type` 是一个字符串"为止, 于是 ContentBlock.raw(宿主手搓的 map)
+     * 能交出 `type:"image"` 却没有 `data` 的消息 —— 官方 TS 1.30.1 与 python 1.27.1 都按
+     * <b>整份</b> GetPromptResult 判定, 这一条把同批那条合规邻居一起带走.
+     *
+     * <p>每格的判决都量过, 不是推的: 12 格来自 ref66_cells.json(19 格那张表), 7 格来自
+     * ref66b_cells.json(专测"候选闸门会不会比客户端严"的 12 格), 两条腿逐格同判.
+     * 唯一一格例外是 resource_inner_text_number —— 它与已测的 cb_image_data_number
+     * 是同一判据(必填字符串给了数字), 但两腿都没逐格交过这一形, 名字里明写.
+     */
+    @Test
+    public void content_blocks_that_are_not_one_of_the_five_branches_are_refused_and_named()
+            throws Exception {
+        List<Object[]> rows = new ArrayList<Object[]>();
+        rows.add(new Object[]{"cb_type_number", "type 不是字符串(旧闸已管)", block("type", 5, "text", "x"),
+                "not a typed content block"});
+        rows.add(new Object[]{"cb_type_null", "type 为 null(旧闸已管)", block("type", null, "text", "x"),
+                "not a typed content block"});
+        rows.add(new Object[]{"cb_type_missing", "type 整槽缺失(旧闸已管)", block("text", "x"),
+                "not a typed content block"});
+        rows.add(new Object[]{"cb_banana", "type=banana 不在五支里", block("type", "banana", "text", "x"),
+                "content type \"banana\" is not one of"});
+        rows.add(new Object[]{"cb_text_missing_text", "text 缺 text", block("type", "text"), "string field \"text\""});
+        rows.add(new Object[]{"cb_text_number", "text 的 text 是数字", block("type", "text", "text", 5),
+                "string field \"text\""});
+        rows.add(new Object[]{"cb_text_null", "text 的 text 是 null", block("type", "text", "text", null),
+                "string field \"text\""});
+        rows.add(new Object[]{"cb_image_missing_data", "image 缺 data", block("type", "image", "mimeType", "image/png"),
+                "string field \"data\""});
+        rows.add(new Object[]{"cb_image_missing_mime", "image 缺 mimeType", block("type", "image", "data", "AAAA"),
+                "string field \"mimeType\""});
+        rows.add(new Object[]{"cb_image_data_number", "image 的 data 是数字", block("type", "image", "data", 5,
+                "mimeType", "image/png"), "string field \"data\""});
+        rows.add(new Object[]{"cb_image_mime_number", "image 的 mimeType 是数字", block("type", "image", "data", "AAAA",
+                "mimeType", 5), "string field \"mimeType\""});
+        rows.add(new Object[]{"cb_audio_missing_both", "audio 支内必填全缺", block("type", "audio"),
+                "string field \"data\""});
+        rows.add(new Object[]{"cb_audio_missing_mime", "audio 缺 mimeType(我们自己的 builder 也交得出这一形)",
+                block("type", "audio", "data", "AAAA"), "string field \"mimeType\""});
+        rows.add(new Object[]{"cb_link_missing_uri", "resource_link 缺 uri", block("type", "resource_link", "name", "n"),
+                "string field \"uri\""});
+        rows.add(new Object[]{"cb_link_missing_name", "resource_link 缺 name", block("type", "resource_link", "uri", "z-mcp://y"),
+                "string field \"name\""});
+        rows.add(new Object[]{"cb_link_uri_number", "resource_link 的 uri 是数字",
+                block("type", "resource_link", "name", "n", "uri", 5), "string field \"uri\""});
+        rows.add(new Object[]{"cb_resource_missing_inner", "resource 缺里层对象", block("type", "resource"),
+                "an object field \"resource\""});
+        rows.add(new Object[]{"cb_resource_inner_not_map", "resource 的里层是字符串",
+                block("type", "resource", "resource", "oops"), "an object field \"resource\""});
+        rows.add(new Object[]{"cb_resource_inner_empty", "resource 的里层是空对象",
+                block("type", "resource", "resource", block()), "string field \"uri\" inside \"resource\""});
+        rows.add(new Object[]{"cb_resource_inner_no_uri", "resource 的里层缺 uri",
+                block("type", "resource", "resource", block("text", "x")),
+                "string field \"uri\" inside \"resource\""});
+        rows.add(new Object[]{"cb_resource_inner_no_text", "resource 的里层既无 text 也无 blob",
+                block("type", "resource", "resource", block("uri", "z-mcp://y")),
+                "either a string \"text\" or a string"});
+        rows.add(new Object[]{"cb_resource_inner_text_null", "resource 的里层 text 是 null",
+                block("type", "resource", "resource", block("uri", "z-mcp://y", "text", null)),
+                "either a string \"text\" or a string"});
+        rows.add(new Object[]{"x_resource_inner_text_number", "resource 的里层 text 是数字(同判据推得, 两腿未逐格交过这一形)",
+                block("type", "resource", "resource", block("uri", "z-mcp://y", "text", 5)),
+                "either a string \"text\" or a string"});
+
+        List<String> wrong = new ArrayList<String>();
+        List<String> refused = new ArrayList<String>();
+        int i = 0;
+        for (Object[] row : rows) {
+            String name = "branch_" + (++i);
+            registerComposedPrompt(name, secondSlot(composedContent(row[2])));
+            Map<String, Object> w = wire(handler.handle(call("prompts/get",
+                    "{\"name\":\"" + name + "\",\"arguments\":{}}", "6" + i), liveSession()));
+            if (w.get("error") == null) {
+                wrong.add(row[0] + "| " + row[1] + " 没被拒, 字节原样上线了: " + w.get("result"));
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> err = (Map<String, Object>) w.get("error");
+            if (!Integer.valueOf(McpException.INVALID_PARAMS).equals(err.get("code"))) {
+                wrong.add(row[0] + "| 没有按 -32602 拒, 而是 " + err);
+                continue;
+            }
+            String msg = String.valueOf(err.get("message"));
+            if (!msg.contains(String.valueOf(row[3]))) {
+                wrong.add(row[0] + "| 的话里点不出问题所在(要含 " + row[3] + "): " + msg);
+            }
+            if (!msg.contains("message 1")) {
+                wrong.add(row[0] + "| 的话里点不出是第几条: " + msg);
+            }
+            refused.add(name + " " + msg);
+        }
+        assertEquals("逐格读数: " + wrong, 0, wrong.size());
+        assertEquals("闸门只该拒掉有读数的格, 拒少了说明判据没接上", rows.size(), refused.size());
+    }
+
+    /**
+     * #66 的反向半: 官方两条腿放行的 9 形必须一个都不拦.
+     *
+     * <p>这一半才是"闸门比客户端严"的保险 —— 客户端容忍的形状被我们 -32602 掉, 是新的
+     * 互操作故障. 里层同时带 text 与 blob、带规范里没写的多余字段、text 为空串这三格
+     * 都实测过 ACCEPT(ref66b_cells.json), 所以不许把它们收进判据.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    public void every_branch_the_reference_clients_accept_still_passes_the_content_gate()
+            throws Exception {
+        List<Object[]> rows = new ArrayList<Object[]>();
+        rows.add(new Object[]{"cb_valid_text", "text", block("type", "text", "text", "x")});
+        rows.add(new Object[]{"cb_valid_image", "image", block("type", "image", "data", "AAAA", "mimeType", "image/png")});
+        rows.add(new Object[]{"cb_valid_audio", "audio", block("type", "audio", "data", "AAAA", "mimeType", "audio/wav")});
+        rows.add(new Object[]{"cb_valid_resource_link", "resource_link",
+                block("type", "resource_link", "name", "n", "uri", "z-mcp://y")});
+        rows.add(new Object[]{"cb_valid_resource_text", "resource 带 text",
+                block("type", "resource", "resource", block("uri", "z-mcp://y", "text", "x"))});
+        rows.add(new Object[]{"cb_valid_resource_blob", "resource 带 blob",
+                block("type", "resource", "resource", block("uri", "z-mcp://y", "blob", "AAAA"))});
+        rows.add(new Object[]{"cb_valid_text_empty", "text 为空串(我们自己的 Embedded builder 就这么写)",
+                block("type", "text", "text", "")});
+        rows.add(new Object[]{"cb_extra_unknown_field", "多带一个规范里没有的字段",
+                block("type", "text", "text", "x", "banana", 1)});
+        rows.add(new Object[]{"cb_resource_inner_both_text_and_blob", "里层同时带 text 与 blob",
+                block("type", "resource", "resource",
+                        block("uri", "z-mcp://y", "text", "x", "blob", "AAAA"))});
+
+        List<String> refused = new ArrayList<String>();
+        int i = 0;
+        for (Object[] row : rows) {
+            String name = "clean_" + (++i);
+            List<Map<String, Object>> messages = secondSlot(composedContent(row[2]));
+            registerComposedPrompt(name, messages);
+            Map<String, Object> w = wire(handler.handle(call("prompts/get",
+                    "{\"name\":\"" + name + "\",\"arguments\":{}}", "7" + i), liveSession()));
+            if (w.get("error") != null) {
+                refused.add(row[0] + "| (" + row[1] + ") 被拒了, 而官方两条腿都放行这一格: "
+                        + w.get("error"));
+                continue;
+            }
+            List<Map<String, Object>> wireMessages =
+                    (List<Map<String, Object>>) ((Map<String, Object>) w.get("result")).get("messages");
+            if (!messages.equals(wireMessages)) {
+                refused.add(row[0] + "| 过了闸但字节被改: " + wireMessages);
+            }
+        }
+        assertEquals("闸门比客户端严的那些格: " + refused, 0, refused.size());
+    }
+
+    /** 拼一个 content 块: 成对写; 不传那一对了就是"整槽缺失", 传 null 就是"槽在而值为 null". */
+    private static Map<String, Object> block(Object... kv) {
+        Map<String, Object> m = new java.util.LinkedHashMap<String, Object>();
+        for (int i = 0; i < kv.length; i += 2) {
+            m.put(String.valueOf(kv[i]), kv[i + 1]);
+        }
+        return m;
+    }
+
     private static final List<Map<String, Object>> SENTINEL_NULL_LIST =
             new ArrayList<Map<String, Object>>();
 
