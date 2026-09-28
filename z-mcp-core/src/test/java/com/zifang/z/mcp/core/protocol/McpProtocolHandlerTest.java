@@ -1166,6 +1166,240 @@ public class McpProtocolHandlerTest {
         assertEquals(Integer.valueOf(McpException.RESOURCE_NOT_FOUND), err.get("code"));
     }
 
+    /**
+     * #65 的判据正面: reader 交回的块若 {@code resources/read} 表达不出, 按 -32602 拒并点名,
+     * <b>不再折成正文</b>.
+     *
+     * <p>修法前这一层只有一句 {@code c.put("text", String.valueOf(wire.get("text")))}: 非文本块没有
+     * {@code text} 键, 于是图片字节整个丢掉、正文变成字符串 {@code "null"}。而这一格<b>两条官方腿都
+     * 放行</b>({@code "null"} 是一个合法 string, 现读 {@code ref65_grade_ts.log} /
+     * {@code ref65_grade_py.log} 的 {@code rc_text_null_string}) ⇒ 互操作测试永远抓不到它, 只能由
+     * 生产者自己断言。这也是这张表存在的理由。
+     *
+     * <p>同一张表的另一端定了"能不能少写一点": 只带 {@code uri} 的那一格({@code rc_only_uri})
+     * <b>两腿都拒</b> —— 客户端判的是<b>整份</b> {@code ReadResourceResult}, 一条坏行带走同结果里
+     * 所有合规邻居。所以"摘掉那句 put"会把一个谎换成一次整页消失, 表达不出时只能报错。
+     *
+     * <p>逐格都是<b>可达</b>形状: 宿主 reader 交 {@code ContentBlock.Raw}(代理上游时
+     * {@code fromWire} 一律还原成 Raw, 于是上游交什么我们转什么)、交 {@code ResourceLink},
+     * 或干脆交回 null。{@code blob} 那几格的 base64 口径不是照正则式写的, 是 35 形逐格与 TS 腿对过账的
+     * 量出来的那一条(见 {@code McpProtocolHandler.isWireBase64} 的注释与 {@code ref65b_diff.py})。
+     *
+     * <p>27 格收进一张表一次断言 —— #43/#56 那条老债的形状: JUnit 的 fail-fast 会吞掉同一方法里
+     * 第 2—N 格, 一格一个 @Test 会让"漏了哪几型"重新变成猜的。反向那半(17 格)在
+     * {@link #every_read_result_the_reference_clients_accept_keeps_its_own_bytes}。
+     */
+    @Test
+    public void a_read_result_that_resources_read_cannot_express_is_refused_and_named()
+            throws Exception {
+        List<Object[]> rows = new ArrayList<Object[]>();
+        // row = {这一格是什么, reader 交回的块(null 表示 reader 交回 null), 话里必须点出的问题}
+        rows.add(new Object[]{"reader 交回 null 块", null,
+                "was read by a reader that returned no content block"});
+        rows.add(new Object[]{"Raw 连 type 都没有(getType 回落成 text 却没有 text)", rawBlock(),
+                "of type \"text\" without a string \"text\" field"});
+        rows.add(new Object[]{"type=text 而 text 整槽缺失", rawBlock("type", "text"),
+                "of type \"text\" without a string \"text\" field"});
+        rows.add(new Object[]{"type=text 而 text 是 null", rawBlock("type", "text", "text", null),
+                "of type \"text\" without a string \"text\" field"});
+        rows.add(new Object[]{"type=text 而 text 是数字", rawBlock("type", "text", "text", 5),
+                "of type \"text\" without a string \"text\" field"});
+        rows.add(new Object[]{"type=image 缺 data", rawBlock("type", "image", "mimeType", "image/png"),
+                "of type \"image\" without a string \"data\" field"});
+        rows.add(new Object[]{"type=image 的 data 是数字",
+                rawBlock("type", "image", "data", 5, "mimeType", "image/png"),
+                "of type \"image\" without a string \"data\" field"});
+        rows.add(new Object[]{"type=image 的 data 不是 base64",
+                rawBlock("type", "image", "data", "not base64 !!!"),
+                "field \"data\" \"not base64 !!!\" is not a base64 string"});
+        rows.add(new Object[]{"type=audio 的 data 补位过头(我们自己的编码器产不出这一形)",
+                rawBlock("type", "audio", "data", "A==="), "is not a base64 string"});
+        // 下面这一段是 base64 谓词自己的子表: 口径来自 35 形逐格与 TS 腿对过账的那份量具
+        // (McpProtocolHandler.isWireBase64 的注释), 每摘掉谓词里的一条规则就有一格具名变红.
+        rows.add(new Object[]{"blob 只有一个字符(被拒的是 4k+1 那一种长度)",
+                rawBlock("type", "image", "data", "A"), "is not a base64 string"});
+        rows.add(new Object[]{"整块之后再补两位(补位与正文长度不相配)",
+                rawBlock("type", "image", "data", "AAAA=="), "is not a base64 string"});
+        rows.add(new Object[]{"整块之后补一位",
+                rawBlock("type", "image", "data", "AAAA="), "is not a base64 string"});
+        rows.add(new Object[]{"两位正文配三位补位(补位个数超上限)",
+                rawBlock("type", "image", "data", "AB==="), "is not a base64 string"});
+        rows.add(new Object[]{"等号后面还有正文",
+                rawBlock("type", "image", "data", "QQ==A"), "is not a base64 string"});
+        rows.add(new Object[]{"补位被正文打断又继续补(A=A=): 摘掉『等号之后不许有正文』只有这一格抓得到",
+                rawBlock("type", "image", "data", "A=A="), "is not a base64 string"});
+        rows.add(new Object[]{"整串只有补位", rawBlock("type", "image", "data", "=="),
+                "is not a base64 string"});
+        rows.add(new Object[]{"url-safe 方言的字符不在标准字母表里",
+                rawBlock("type", "image", "data", "A-_A"), "is not a base64 string"});
+        rows.add(new Object[]{"正文里混进垂直制表: JS 的空白类认它, 腿在这一族不剥(b_space_vt REJECT)",
+                rawBlock("type", "image", "data", "AA" + (char) 11 + "AA"), "is not a base64 string"});
+        rows.add(new Object[]{"正文里混进 NBSP(同上, b_space_nbsp REJECT)",
+                rawBlock("type", "image", "data", "AA" + (char) 0xA0 + "AA"), "is not a base64 string"});
+        rows.add(new Object[]{"type=banana 不在 ContentBlock 那五支里",
+                rawBlock("type", "banana", "text", "x"),
+                "of type \"banana\", which resources/read can only express as text or blob"});
+        rows.add(new Object[]{"type 是数字(字符串化后进未知支)", rawBlock("type", 5, "text", "x"),
+                "of type \"5\", which resources/read can only express as text or blob"});
+        rows.add(new Object[]{"resource_link: 目录里的一个指针, 没有内容可交",
+                ContentBlock.resourceLink("z-mcp://r65a/inner", "n"),
+                "a \"resource_link\" block, which resources/read cannot express"});
+        rows.add(new Object[]{"type=resource 缺里层对象", rawBlock("type", "resource"),
+                "of type \"resource\" without an object \"resource\""});
+        rows.add(new Object[]{"type=resource 的里层是字符串", rawBlock("type", "resource", "resource", "oops"),
+                "of type \"resource\" without an object \"resource\""});
+        rows.add(new Object[]{"里层只有 mimeType: 两支必填都不满足",
+                rawBlock("type", "resource", "resource", block("mimeType", "text/plain")),
+                "inner contents need either a string \"text\" or a base64 string \"blob\""});
+        rows.add(new Object[]{"里层只有 uri(rc_only_uri 那一格, 两腿都拒)",
+                rawBlock("type", "resource", "resource", block("uri", "z-mcp://r65a/inner")),
+                "inner contents need either a string \"text\" or a base64 string \"blob\""});
+        rows.add(new Object[]{"里层 blob 非法且没有可用文本",
+                rawBlock("type", "resource", "resource",
+                        block("uri", "z-mcp://r65a/inner", "blob", "not base64 !!!")),
+                "inner contents need either a string \"text\" or a base64 string \"blob\""});
+        rows.add(new Object[]{"里层 text 是 null 且没有 blob",
+                rawBlock("type", "resource", "resource",
+                        block("uri", "z-mcp://r65a/inner", "text", null)),
+                "inner contents need either a string \"text\" or a base64 string \"blob\""});
+
+        List<String> wrong = new ArrayList<String>();
+        List<String> refused = new ArrayList<String>();
+        int i = 0;
+        for (Object[] row : rows) {
+            String uri = "z-mcp://r65a/" + (++i);
+            registry.registerResource(new com.zifang.z.mcp.api.dto.McpResourceDto(uri, "r65a" + i,
+                    "d", "text/plain", readerReturning((ContentBlock) row[1])));
+            Map<String, Object> w = wire(handler.handle(call("resources/read",
+                    "{\"uri\":\"" + uri + "\"}", "650" + i), liveSession()));
+            if (w.get("error") == null) {
+                wrong.add(row[0] + "| 没被拒, 字节原样上线了: " + w.get("result"));
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> err = (Map<String, Object>) w.get("error");
+            if (!Integer.valueOf(McpException.INVALID_PARAMS).equals(err.get("code"))) {
+                wrong.add(row[0] + "| 没有按 -32602 拒, 而是 " + err);
+                continue;
+            }
+            String msg = String.valueOf(err.get("message"));
+            if (!msg.contains(String.valueOf(row[2]))) {
+                wrong.add(row[0] + "| 的话里点不出问题所在(要含 " + row[2] + "): " + msg);
+            }
+            if (!msg.contains(uri)) {
+                wrong.add(row[0] + "| 的话里没点名是哪条资源(" + uri + "): " + msg);
+            }
+            refused.add(uri + " " + msg);
+        }
+        assertEquals("逐格读数: " + wrong, 0, wrong.size());
+        assertEquals("闸门只该拒掉有读数的格, 拒少了说明判据没接上", rows.size(), refused.size());
+    }
+
+    /**
+     * #65 的反向半: 两条官方腿放行的形状一个都不许拦, 而且<b>字节不许被改</b>.
+     *
+     * <p>"闸门比客户端严"在这一族里是新故障而不是保守: 客户端读得出来的正文被我们 -32602 掉, 用户看到的
+     * 是一个本来好好的资源读不出来。期望值是<b>逐键写死的整份 item</b> —— 不写"有没有 text 键"那种弱判据,
+     * 因为这一族的原始缺陷({@code text:"null"})正好长得像"有 text 键"。
+     *
+     * <p>{@code "AA AA"} 那一格是刻意留的: 腿对它 ACCEPT(35 形对账里的 {@code b_space_inside}),
+     * 我们既不重编码也不拒 —— 重编码等于把宿主的字节换成我们的, 拒则比参照严。
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    public void every_read_result_the_reference_clients_accept_keeps_its_own_bytes()
+            throws Exception {
+        final byte[] png = new byte[]{(byte) 0x89, 'P', 'N', 'G', 1, 2};
+        final String pngB64 = java.util.Base64.getEncoder().encodeToString(png);
+        List<Object[]> rows = new ArrayList<Object[]>();
+        // row = {这一格是什么, 目录里声明的 mimeType, reader 交回的块, 线上必须出现的那一份 item}
+        rows.add(new Object[]{"文本块 + 目录声明类型", "text/plain", ContentBlock.text("body"),
+                block("mimeType", "text/plain", "text", "body")});
+        rows.add(new Object[]{"文本块且目录没声明类型(不许凭空造一个 mimeType)", null,
+                ContentBlock.text("body"), block("text", "body")});
+        rows.add(new Object[]{"ContentBlock.text(null) 在块内已折成空串(我们自己的 builder 就这么写)",
+                null, ContentBlock.text(null), block("text", "")});
+        rows.add(new Object[]{"图片字节进 blob, 块自带的 mimeType 盖过目录那一份", "text/plain",
+                ContentBlock.image(png, "image/png"),
+                block("mimeType", "image/png", "blob", pngB64)});
+        rows.add(new Object[]{"图片但块没声明 mimeType ⇒ 回落目录那一份", "application/octet-stream",
+                ContentBlock.image(png, null),
+                block("mimeType", "application/octet-stream", "blob", pngB64)});
+        rows.add(new Object[]{"两头都没 mimeType: BlobResourceContents 必填只有 blob+uri", null,
+                ContentBlock.image(png, null), block("blob", pngB64)});
+        rows.add(new Object[]{"零字节图片(base64 是空串, 腿对 b_empty 实测 ACCEPT)", "image/png",
+                ContentBlock.image(new byte[0], "image/png"),
+                block("mimeType", "image/png", "blob", "")});
+        rows.add(new Object[]{"音频", "audio/wav", ContentBlock.audio(png, "audio/wav"),
+                block("mimeType", "audio/wav", "blob", pngB64)});
+        rows.add(new Object[]{"内嵌资源自带 uri 与类型(里层那份说话, 不是请求那一份)", "text/markdown",
+                ContentBlock.resource("z-mcp://r65b/inner", "text/plain", "inner body"),
+                block("uri", "z-mcp://r65b/inner", "mimeType", "text/plain", "text", "inner body")});
+        rows.add(new Object[]{"内嵌资源的 uri 是 null(appendFields 无条件写 uri) ⇒ 回落请求那一条", null,
+                new ContentBlock.Embedded(null, "text/plain", "x", null),
+                block("uri", "PENDING", "mimeType", "text/plain", "text", "x")});
+        rows.add(new Object[]{"内嵌二进制", null, ContentBlock.resource("z-mcp://r65b/bin", null, png),
+                block("uri", "z-mcp://r65b/bin", "blob", pngB64)});
+        rows.add(new Object[]{"Raw 文本块带一个规范里没有的多余字段 ⇒ 不上线(腿放行这一格, 但我们不交)",
+                null, rawBlock("type", "text", "text", "x", "banana", 1), block("text", "x")});
+        rows.add(new Object[]{"Raw 图片的 mimeType 是数字 ⇒ 这一格不进线(rc_mime_number 两腿都拒)", null,
+                rawBlock("type", "image", "data", "AAAA", "mimeType", 5), block("blob", "AAAA")});
+        rows.add(new Object[]{"宿主给的 base64 含空白: 腿 ACCEPT(b_space_inside) ⇒ 不重编码也不拒", null,
+                rawBlock("type", "image", "data", "AA AA"), block("blob", "AA AA")});
+        rows.add(new Object[]{"同上但换行(MIME 折行的形状, b_newline ACCEPT)", null,
+                rawBlock("type", "image", "data", "AAA" + (char) 10 + "A"), block("blob", "AAA" + (char) 10 + "A")});
+        rows.add(new Object[]{"里层同时有合格文本与非法 blob ⇒ 走文本那支(c_text_plus_bad_blob)", null,
+                rawBlock("type", "resource", "resource",
+                        block("uri", "z-mcp://r65b/both", "text", "x", "blob", "not base64 !!!")),
+                block("uri", "z-mcp://r65b/both", "text", "x")});
+        rows.add(new Object[]{"里层 uri 是数字 ⇒ 回落请求那一条(rc_uri_number 两腿都拒)", "text/plain",
+                rawBlock("type", "resource", "resource", block("uri", 5, "text", "x")),
+                block("uri", "PENDING", "mimeType", "text/plain", "text", "x")});
+
+        List<String> wrong = new ArrayList<String>();
+        int i = 0;
+        for (Object[] row : rows) {
+            String uri = "z-mcp://r65b/" + (++i);
+            registry.registerResource(new com.zifang.z.mcp.api.dto.McpResourceDto(uri, "r65b" + i,
+                    "d", (String) row[1], readerReturning((ContentBlock) row[2])));
+            Map<String, Object> w = wire(handler.handle(call("resources/read",
+                    "{\"uri\":\"" + uri + "\"}", "651" + i), liveSession()));
+            if (w.get("error") != null) {
+                wrong.add(row[0] + "| 被拒了, 而官方两条腿都放行这一格: " + w.get("error"));
+                continue;
+            }
+            Map<String, Object> result = (Map<String, Object>) w.get("result");
+            List<Map<String, Object>> contents = (List<Map<String, Object>>) result.get("contents");
+            if (contents == null || contents.size() != 1) {
+                wrong.add(row[0] + "| contents 不是恰好一条: " + result);
+                continue;
+            }
+            Map<String, Object> item = wireMap(contents.get(0));
+            Map<String, Object> expected = (Map<String, Object>) row[3];
+            if ("PENDING".equals(expected.get("uri"))) expected.put("uri", uri);
+            if (!expected.containsKey("uri")) expected.put("uri", uri);
+            if (!expected.equals(item)) {
+                wrong.add(row[0] + "| 字节不对: 期望 " + wireMap(expected) + " 实得 " + item);
+            }
+            if ("null".equals(item.get("text"))) {
+                wrong.add(row[0] + "| 又出现了修法前那一格(正文=字符串 \"null\"): " + item);
+            }
+        }
+        assertEquals("被闸门误伤或被改字节的那些格: " + wrong, 0, wrong.size());
+    }
+
+    /** 一个只交回固定块的 reader; {@code null} 表示 reader 交回 null(修前那一步会 NPE 成 -32603). */
+    private static com.zifang.z.mcp.api.dto.McpResourceDto.Reader readerReturning(final ContentBlock b) {
+        return new com.zifang.z.mcp.api.dto.McpResourceDto.Reader() {
+            @Override public ContentBlock read(Map<String, Object> params) { return b; }
+        };
+    }
+
+    /** 拼一个宿主/上游原样的块: 走 Raw, 因为 fromWire 在代理边界上一律还原成 Raw. */
+    private static ContentBlock rawBlock(Object... kv) {
+        return ContentBlock.raw(block(kv));
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     public void subscribe_is_refused_because_capability_is_not_claimed() throws Exception {

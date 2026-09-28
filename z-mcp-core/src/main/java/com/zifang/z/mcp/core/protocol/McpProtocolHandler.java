@@ -703,24 +703,177 @@ public class McpProtocolHandler {
             throw McpException.invalidParams("resource " + uri + " is not readable: " + describe(e));
         }
         List<Map<String, Object>> contents = new ArrayList<Map<String, Object>>();
-        Map<String, Object> c = new LinkedHashMap<String, Object>();
-        c.put("uri", uri);
-        if (resource.getMimeType() != null) c.put("mimeType", resource.getMimeType());
-        if (block instanceof ContentBlock.Embedded) {
-            Map<String, Object> wire = block.toWire();
-            Object inner = wire.get("resource");
-            if (inner instanceof Map) {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> im = (Map<String, Object>) inner;
-                c.putAll(im);
-            }
-        } else {
-            c.put("text", String.valueOf(block.toWire().get("text")));
-        }
-        contents.add(c);
+        contents.add(foldResourceContents(uri, resource.getMimeType(), block, resource.getUri()));
         Map<String, Object> result = new LinkedHashMap<String, Object>();
         result.put("contents", contents);
         return result;
+    }
+
+    /**
+     * #65: 工具体交回来的是<b>一块</b> {@link ContentBlock}, 而 {@code contents} 那一槽要的是
+     * {@code TextResourceContents} (required {@code ['text','uri']}) 或 {@code BlobResourceContents}
+     * (required {@code ['blob','uri']}) —— 两支里都没有 {@code type}, 也没有 {@code data}/
+     * {@code resource_link} 那一族。
+     *
+     * <p>修法前这里只有一句 {@code c.put("text", String.valueOf(wire.get("text")))}: 非文本块没有
+     * {@code text} 键, 于是图片的字节整个丢掉、正文变成字符串 {@code "null"}。参照抓不到这一格 ——
+     * 现读 {@code ref65_grade_ts.log} / {@code ref65_grade_py.log} 里 {@code rc_text_null_string}
+     * <b>两条官方腿都 ACCEPT</b>(因为 {@code "null"} 是一个合法 string)。所以只能由生产者自己判。
+     *
+     * <p>同一张表的另一端定了修法不能怎么写: {@code rc_only_uri}(只带 {@code uri}, 既无 {@code text}
+     * 也无 {@code blob})<b>两腿都 REJECT</b> ⇒ "把那一行 put 摘掉"会让整份 {@code ReadResourceResult}
+     * 在客户端消失(邻居条目一起没), 比原来那句谎更糟。
+     *
+     * <p>{@code blob} 那一支额外查 base64: 这是本族里唯一一条"一支拒、一支放"的分叉 ——
+     * 同一个 {@code blob:"not base64 !!!"} 在 TS 腿是 {@code REJECT "Invalid Base64 string"}
+     * (sdk 1.30.1 对 {@code BlobResourceContents.blob} 用的是 zod 的 {@code .base64()}), 在 python 腿
+     * 是 {@code ACCEPT}(1.27.1 不看)。收在严的那侧, 理由不是"照着谁", 而是发出去的字节不该让任何
+     * 一条官方客户端把整份结果拒掉。注意这与 #55 那条"JSON Schema 的 {@code format} 不作断言"不冲突:
+     * 那一族判的是<b>广告出去的 schema</b> 里的注解, 这一条是<b>客户端自己的 schema</b> 里的约束。
+     *
+     * <p>{@code resource_link} 与未知 {@code type} 一律拒(-32602 而不是折成文本): 两家官方服务端在这
+     * 一层都表达不出这一支(python 的 reader 只能交 {@code content: str|bytes}), 而把它们折成
+     * {@code text} 就是又一次凭空造正文。
+     */
+    private Map<String, Object> foldResourceContents(String requestedUri, String declaredMimeType,
+            ContentBlock block, String resourceUri) {
+        if (block == null) {
+            throw McpException.invalidParams("resource " + requestedUri
+                    + " was read by a reader that returned no content block");
+        }
+        Map<String, Object> wire = block.toWire();
+        Object rawType = wire.get("type");
+        String type = rawType instanceof String ? (String) rawType : String.valueOf(rawType);
+
+        Map<String, Object> item = new LinkedHashMap<String, Object>();
+        item.put("uri", requestedUri);
+        if (declaredMimeType != null) item.put("mimeType", declaredMimeType);
+
+        if ("text".equals(type)) {
+            Object text = wire.get("text");
+            if (!(text instanceof String)) {
+                throw McpException.invalidParams("resource " + requestedUri
+                        + " reader returned a block of type \"text\" without a string \"text\" field");
+            }
+            item.put("text", text);
+            return item;
+        }
+
+        if ("image".equals(type) || "audio".equals(type)) {
+            Object data = wire.get("data");
+            if (!(data instanceof String)) {
+                throw McpException.invalidParams("resource " + requestedUri
+                        + " reader returned a block of type \"" + type
+                        + "\" without a string \"data\" field");
+            }
+            requireWireBase64("resource " + requestedUri + " block of type \"" + type
+                    + "\" field \"data\"", (String) data);
+            Object blockMime = wire.get("mimeType");
+            if (blockMime instanceof String) {
+                item.put("mimeType", blockMime); // 字节与它声明的类型必须同源, 不能拿目录里那一份
+            }
+            item.put("blob", data);
+            return item;
+        }
+
+        if ("resource".equals(type)) {
+            Object innerObj = wire.get("resource");
+            if (!(innerObj instanceof Map)) {
+                throw McpException.invalidParams("resource " + requestedUri
+                        + " reader returned a block of type \"resource\" without an object \"resource\"");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> inner = (Map<String, Object>) innerObj;
+            Map<String, Object> out = new LinkedHashMap<String, Object>(inner);
+            // 里层的 uri/mimeType 也可能是宿主手搓的: 非字符串的那一格整份 result 会在两条腿上被拒
+            // (rc_uri_number / rc_mime_number 两腿都 REJECT), 所以只让字符串进线, 其余回落到目录那一份.
+            if (!(out.get("uri") instanceof String) || ((String) out.get("uri")).isEmpty()) {
+                out.put("uri", requestedUri); // Embedded.appendFields 会无条件写 uri, 宿主可以给 null
+            }
+            if (!(out.get("mimeType") instanceof String)) {
+                if (declaredMimeType != null) out.put("mimeType", declaredMimeType);
+                else out.remove("mimeType");
+            }
+            Object text = out.get("text");
+            Object blob = out.get("blob");
+            boolean textFits = text instanceof String;
+            boolean blobFits = blob instanceof String && isWireBase64((String) blob);
+            // 顺序按"哪一支能独立成立"选, 不是按字段出现顺序: 一支站得住时另一支的坏值只会被摘掉,
+            // 不会让整条请求挨拒. 现读 ref65c_grade_ts.log 三格: 同一个坏 blob 单摆 REJECT
+            // (c_bad_blob_alone ⇒ 腿确实查 base64), 与文本同摆则 ACCEPT(c_text_plus_bad_blob ⇒ 那条
+            // ACCEPT 来自 text 这一支站得住, 而不是腿没看见坏值). 所以"摘掉坏的那一支"与参照同判;
+            // 真正的加强只落在参照两支都不收的形状上 —— 坏 blob 且没有可用文本.
+            if (textFits) {
+                out.remove("blob"); // 两支都命中时参照放行(rc_both_text_and_blob), 但本仓不交两份正文
+                return out;
+            }
+            if (blobFits) {
+                out.remove("text");
+                return out;
+            }
+            throw McpException.invalidParams("resource " + requestedUri
+                    + " inner contents need either a string \"text\" or a base64 string \"blob\""
+                    + " (uri " + out.get("uri") + " alone is not one of the two branches)");
+        }
+
+        if ("resource_link".equals(type)) {
+            throw McpException.invalidParams("resource " + requestedUri
+                    + " reader returned a \"resource_link\" block, which resources/read cannot express"
+                    + " (return text or bytes for " + resourceUri + ")");
+        }
+        throw McpException.invalidParams("resource " + requestedUri
+                + " reader returned a block of type \"" + type
+                + "\", which resources/read can only express as text or blob");
+    }
+
+    /**
+     * #65: 折成 {@code blob} 前查的是 TS 腿会查的那一条(sdk 1.30.1 对 {@code BlobResourceContents.blob}
+     * 用的是 zod 的 {@code .base64()}: 同一个串在 TS 腿 {@code REJECT "Invalid Base64 string"},
+     * 在 python 腿一律 {@code ACCEPT} —— 现读 {@code ref65b_grade_{ts,py}.log})。
+     *
+     * <p><b>口径是量出来的, 不是照正则式写的</b>(35 形逐格对账见 {@code ref65b_diff.py},
+     * 与 TS 腿同判 35/35)。两条反直觉的实测形状:
+     * <ul>
+     *   <li>剥 ASCII 空白 —— {@code "AA AA"}、{@code "AAA\nA"}、{@code " AAAA"}、tab/CR/FF 都算合法,
+     *       而垂直制表 {@code \u000B} 与 NBSP {@code \u00A0} <b>不</b>算(JS 的 {@code \s} 认这两个,
+     *       这一族里腿不认)。</li>
+     *   <li>不要求 4 对齐 —— {@code "AAAAAAAAAA"}(10 个字符)与 {@code "QQ"} 都合法,
+     *       只有 {@code 4k+1} 那一种长度被拒({@code "A"}、{@code "AAAAA"})。</li>
+     * </ul>
+     * 补位只许出现在末尾且至多两位, 位置还要与正文长度相配({@code "AA=A"}、{@code "A==="}、
+     * {@code "AAAA=="} 三种都实测被拒)。
+     *
+     * <p>与 {@code Base64.getEncoder()} 的产物一致: 本仓自己编码出来的字节一定过这一关。
+     */
+    private static boolean isWireBase64(String s) {
+        int len = s.length();
+        int body = 0;   // 剥掉空白与补位之后的正文字符数
+        int pad = 0;    // 末尾补位个数
+        boolean seenPad = false;
+        for (int i = 0; i < len; i++) {
+            char c = s.charAt(i);
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f') continue;
+            if (c == '=') {
+                seenPad = true;
+                pad++;
+                continue;
+            }
+            if (seenPad) return false;         // 等号之后还有正文
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                    || c == '+' || c == '/')) return false;
+            body++;
+        }
+        if (pad > 2) return false;
+        int mod = body % 4;
+        if (pad == 0) return mod != 1;         // 缺补位只有 4k+1 那一种被拒
+        if (pad == 1) return mod == 3;
+        return mod == 2;
+    }
+
+    private static void requireWireBase64(String what, String s) {
+        if (!isWireBase64(s)) {
+            throw McpException.invalidParams(what + " \"" + s + "\" is not a base64 string");
+        }
     }
 
     // -------------------------------------------------------------- prompts
