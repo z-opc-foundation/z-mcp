@@ -255,6 +255,85 @@ public class McpRegistryTest {
         assertTrue(nul.isBuiltin());
     }
 
+    /**
+     * #64: 协议把 Resource.name / ResourceTemplate.name 写成必填字符串, 而 {@code toWire()}
+     * 是无条件 put uri+name ⇒ 一个宿主没填 name 就把 {@code "name": null} 发上线.
+     * 官方两个客户端都按<b>整份</b>结果判定, 于是同页别的宿主的条目一起看不见
+     * (实测读数在 README #64 一节). 闸门因此放在注册入口, 与既有的 uri 守卫同形.
+     */
+    @Test
+    public void a_resource_without_a_name_is_refused_at_registration() {
+        Object[][] rows = {
+                {null, "null"},
+                {"", "空串"},
+        };
+        for (Object[] row : rows) {
+            McpRegistry r = new McpRegistry();
+            r.registerResource(new McpResourceDto("z-mcp://alive", "alive", "d", "text/plain", null));
+            String name = (String) row[0];
+            IllegalArgumentException thrown = null;
+            try {
+                r.registerResource(new McpResourceDto("z-mcp://poison", name, "d", "text/plain", null));
+            } catch (IllegalArgumentException e) {
+                thrown = e;
+            }
+            assertNotNull("name 为 " + row[1] + " 时注册必须拒, 不能把它发上线", thrown);
+            assertTrue("拒的时候要指名是哪条资源: " + thrown.getMessage(),
+                    thrown.getMessage().contains("z-mcp://poison"));
+            assertEquals("拒掉一条不该动到已注册的邻居", 1, r.listResources().size());
+            assertEquals("坏条目也不许留在目录里", 0, countNamed(r, "poison"));
+        }
+    }
+
+    @Test
+    public void a_resource_template_without_a_name_is_refused_at_registration() {
+        McpRegistry r = new McpRegistry();
+        r.registerResource(new McpResourceDto("z-mcp://t/ok/{id}", "ok", "d", "text/plain", null));
+        try {
+            r.registerResource(new McpResourceDto("z-mcp://t/poison/{id}", null, "d", "text/plain", null));
+            fail("模板资源的 name 同样是协议必填字符串");
+        } catch (IllegalArgumentException expected) {
+            assertTrue(expected.getMessage().contains("z-mcp://t/poison/{id}"));
+        }
+        assertEquals(1, r.listResourceTemplates().size());
+    }
+
+    /**
+     * #64 的另一半: 注册时只查了 prompt 自己的名字, 没查 PromptArgument.name, 于是
+     * {@code arguments:[{name:null}]} 会原样上线并被整页连坐.
+     */
+    @Test
+    public void a_prompt_argument_without_a_name_is_refused_at_registration() {
+        Object[][] rows = {
+                {null, "null"},
+                {"", "空串"},
+        };
+        for (Object[] row : rows) {
+            McpRegistry r = new McpRegistry();
+            r.registerPrompt(new McpPromptDto("alive", "d",
+                    Collections.singletonList(new McpPromptDto.Arg("topic", "d", true)), null));
+            try {
+                r.registerPrompt(new McpPromptDto("poison", "d",
+                        Collections.singletonList(new McpPromptDto.Arg((String) row[0], "d", true)), null));
+                fail("参数名为 " + row[1] + " 时注册必须拒");
+            } catch (IllegalArgumentException expected) {
+                assertTrue("要指名是哪个 prompt 的第几个参数: " + expected.getMessage(),
+                        expected.getMessage().contains("poison#0"));
+            }
+            assertEquals("拒掉一条不该动到已注册的邻居", 1, r.listPrompts().size());
+        }
+        // 阳性对照: 零参数的 prompt 是合规的, 闸门不许顺手把它拒了.
+        McpRegistry ok = new McpRegistry();
+        ok.registerPrompt(new McpPromptDto("noargs", "d", null, null));
+        assertEquals(1, ok.listPrompts().size());
+    }
+
+    private static int countNamed(McpRegistry r, String name) {
+        int hits = 0;
+        for (McpResourceDto d : r.listResources()) if (name.equals(d.getName())) hits++;
+        return hits;
+    }
+
     private static String repeat(char c, int n) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < n; i++) sb.append(c);

@@ -377,6 +377,12 @@ public class McpRegistry {
         if (resource.getUri() == null || resource.getUri().isEmpty()) {
             throw new IllegalArgumentException("resource uri required");
         }
+        // 协议把 Resource.name / ResourceTemplate.name 定成必填字符串. 少这一步, 一个宿主
+        // 的 null 会让整页 resources/list 在两个官方客户端里整份被拒 —— 连坐的是同页
+        // 其它宿主的条目(实测见 README #64: TS 1.30.1 与 python 1.27.1 判定完全一致).
+        if (resource.getName() == null || resource.getName().isEmpty()) {
+            throw new IllegalArgumentException("resource name required for " + resource.getUri());
+        }
         if (resource.getUri().indexOf('{') >= 0) {
             resourceTemplates.put(resource.getUri(), resource);
         } else {
@@ -415,6 +421,16 @@ public class McpRegistry {
 
     public void registerPrompt(McpPromptDto prompt) {
         validateName(prompt.getName());
+        // PromptArgument.name 同样是协议必填字符串; 只查 prompt 自己的名字会把一个坏参数
+        // 原样发出去, 连坐整页 prompts/list.
+        List<McpPromptDto.Arg> args = prompt.getArguments();
+        for (int i = 0; i < args.size(); i++) {
+            String argName = args.get(i).getName();
+            if (argName == null || argName.isEmpty()) {
+                throw new IllegalArgumentException("prompt argument name required for "
+                        + prompt.getName() + "#" + i);
+            }
+        }
         prompts.put(prompt.getName(), prompt);
         fireChanged(Change.PROMPTS);
     }

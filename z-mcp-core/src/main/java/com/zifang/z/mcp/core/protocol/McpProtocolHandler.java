@@ -763,10 +763,41 @@ public class McpProtocolHandler {
         } catch (Exception e) {
             throw McpException.invalidParams("prompt " + name + " could not be composed: " + describe(e));
         }
+        checkComposedMessages(name, messages);
         Map<String, Object> result = new LinkedHashMap<String, Object>();
         if (prompt.getDescription() != null) result.put("description", prompt.getDescription());
         result.put("messages", messages);
         return result;
+    }
+
+    /**
+     * 宿主 composer 交回来的是裸 Map 列表, 而协议把 PromptMessage 定成
+     * role ∈ {user, assistant} + content 必须是带 type 的内容块.
+     *
+     * <p>不查的后果不是"这一条难看"而是"这一份结果全灭": 官方 TS 1.30.1 与 python 1.27.1
+     * 都按整份 GetPromptResult 判定, 一条坏消息让同批合规消息一起消失, 而客户端只报一句
+     * Invalid input. 在这里拒, 服务端至少说得出是哪一条哪个字段.
+     */
+    private static void checkComposedMessages(String prompt, List<Map<String, Object>> messages) {
+        if (messages == null) {
+            throw McpException.invalidParams("prompt " + prompt + " composed a null messages list");
+        }
+        for (int i = 0; i < messages.size(); i++) {
+            Map<String, Object> m = messages.get(i);
+            if (m == null) {
+                throw McpException.invalidParams("prompt " + prompt + " message " + i + " is null");
+            }
+            Object role = m.get("role");
+            if (!"user".equals(role) && !"assistant".equals(role)) {
+                throw McpException.invalidParams("prompt " + prompt + " message " + i
+                        + " has unsupported role: " + role + " (协议只允许 user|assistant)");
+            }
+            Object content = m.get("content");
+            if (!(content instanceof Map) || !(((Map<?, ?>) content).get("type") instanceof String)) {
+                throw McpException.invalidParams("prompt " + prompt + " message " + i
+                        + " content is not a typed content block");
+            }
+        }
     }
 
     // -------------------------------------------------------------- logging

@@ -1321,6 +1321,118 @@ public class McpProtocolHandlerTest {
                 .contains("echo"));
     }
 
+    /**
+     * #64: 宿主 composer 交回来的是<b>裸</b> Map 列表, 而协议把 PromptMessage 定成
+     * role ∈ {user, assistant} + content 必须是带 type 的内容块. 官方两个客户端都按
+     * <b>整份</b> GetPromptResult 判定 ⇒ 一条坏消息把同批那条合规消息一起带走, 而客户端
+     * 只报一句 Invalid input(逐格实测读数在 README #64 一节).
+     *
+     * <p>所以判据有两层: 这一份结果不许上线, 以及服务端要说出是第几条、坏在哪个字段.
+     */
+    @Test
+    public void a_composed_message_the_protocol_forbids_is_refused_and_named() throws Exception {
+        List<Object[]> rows = new ArrayList<Object[]>();
+        rows.add(new Object[]{"role=system", composedMsg("system"), "message 1"});
+        rows.add(new Object[]{"role=null", composedMsg(null), "message 1"});
+        rows.add(new Object[]{"role=User(大写不算合规)", composedMsg("User"), "message 1"});
+        Map<String, Object> noContent = new java.util.LinkedHashMap<String, Object>();
+        noContent.put("role", "user");
+        rows.add(new Object[]{"content 整槽缺失", noContent, "message 1"});
+        rows.add(new Object[]{"content 是裸字符串", composedContent("plain string"), "message 1"});
+        rows.add(new Object[]{"content 是没有 type 的 map",
+                composedContent(new java.util.LinkedHashMap<String, Object>()), "message 1"});
+        rows.add(new Object[]{"整条 message 是空 map",
+                new java.util.LinkedHashMap<String, Object>(), "message 1"});
+        rows.add(new Object[]{"整条 message 是 null", null, "message 1"});
+        rows.add(new Object[]{"composer 直接返回 null", SENTINEL_NULL_LIST, "null messages list"});
+
+        List<String> wrong = new ArrayList<String>();
+        int i = 0;
+        for (Object[] row : rows) {
+            String name = "poison_" + (++i);
+            List<Map<String, Object>> messages =
+                    row[1] == SENTINEL_NULL_LIST ? null : secondSlot(row[1]);
+            registerComposedPrompt(name, messages);
+            Map<String, Object> w = wire(handler.handle(call("prompts/get",
+                    "{\"name\":\"" + name + "\",\"arguments\":{}}", "4" + i), liveSession()));
+            if (w.get("error") == null) {
+                wrong.add(row[0] + " 没被拒, 直接发上线了: " + w.get("result"));
+                continue;
+            }
+            if (w.get("result") != null) {
+                wrong.add(row[0] + " result 与 error 同时出现: " + w);
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> err = (Map<String, Object>) w.get("error");
+            if (!Integer.valueOf(McpException.INVALID_PARAMS).equals(err.get("code"))) {
+                wrong.add(row[0] + " 没有按 -32602 拒, 而是 " + err);
+                continue;
+            }
+            String msg = String.valueOf(err.get("message"));
+            if (!msg.contains(String.valueOf(row[2]))) {
+                wrong.add(row[0] + " 的话里点不出问题所在(要含 \"" + row[2] + "\"): " + msg);
+            }
+            if (row[1] != SENTINEL_NULL_LIST && msg.contains("\"messages\"")) {
+                wrong.add(row[0] + " 拒答里漏出了宿主的消息体: " + msg);
+            }
+        }
+        assertEquals("逐格读数: " + wrong, 0, wrong.size());
+    }
+
+    /** 阳性对照: 合规的两条消息经过这道闸之后字节不动, 一条都不该少. */
+    @Test
+    @SuppressWarnings("unchecked")
+    public void a_wellformed_composition_keeps_its_own_bytes_through_the_message_gate() throws Exception {
+        List<Map<String, Object>> messages = new ArrayList<Map<String, Object>>();
+        messages.add(com.zifang.z.mcp.api.dto.McpPromptDto.message("user", ContentBlock.text("请评审 echo")));
+        messages.add(com.zifang.z.mcp.api.dto.McpPromptDto.message("assistant", ContentBlock.text("好的")));
+        registerComposedPrompt("clean", messages);
+        Map<String, Object> ok = resultOf(handler.handle(call("prompts/get",
+                "{\"name\":\"clean\",\"arguments\":{}}", "50"), liveSession()));
+        List<Map<String, Object>> wire = (List<Map<String, Object>>) ok.get("messages");
+        assertEquals("闸不许顺手吃掉一条: " + wire, 2, wire.size());
+        assertEquals(messages, wire);
+    }
+
+    private static final List<Map<String, Object>> SENTINEL_NULL_LIST =
+            new ArrayList<Map<String, Object>>();
+
+    private void registerComposedPrompt(String name, final List<Map<String, Object>> messages) {
+        registry.registerPrompt(new com.zifang.z.mcp.api.dto.McpPromptDto(name, "d",
+                java.util.Collections.<com.zifang.z.mcp.api.dto.McpPromptDto.Arg>emptyList(),
+                new com.zifang.z.mcp.api.dto.McpPromptDto.Composer() {
+                    @Override public List<Map<String, Object>> compose(Map<String, Object> arguments) {
+                        return messages;
+                    }
+                }));
+    }
+
+    /** 宿主 composer 的真实形状: 第一条合规, 第二条是被测的那条. */
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> secondSlot(Object bad) {
+        List<Map<String, Object>> messages = new ArrayList<Map<String, Object>>();
+        messages.add(com.zifang.z.mcp.api.dto.McpPromptDto.message("user", ContentBlock.text("neighbour")));
+        messages.add((Map<String, Object>) bad);
+        return messages;
+    }
+
+    private Map<String, Object> composedMsg(String role) {
+        return composedContentWith(role, com.zifang.z.mcp.api.dto.McpPromptDto
+                .message("user", ContentBlock.text("candidate")).get("content"));
+    }
+
+    private Map<String, Object> composedContent(Object content) {
+        return composedContentWith("user", content);
+    }
+
+    private Map<String, Object> composedContentWith(String role, Object content) {
+        Map<String, Object> m = new java.util.LinkedHashMap<String, Object>();
+        m.put("role", role);
+        m.put("content", content);
+        return m;
+    }
+
     // -------------------------------------------------------- 内部错误路径
 
     @Test
