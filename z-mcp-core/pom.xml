@@ -18,17 +18,11 @@
     <name>z-mcp-core</name>
     <description>MCP 注册中心 + McpServer (JSON-RPC over HTTP/SSE) + McpClient 默认实现</description>
 
-    <properties>
-        <maven.compiler.source>8</maven.compiler.source>
-        <maven.compiler.target>8</maven.compiler.target>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    </properties>
-
     <dependencies>
+        <!-- 版本由仓根 DM 的 ${project.version} 下发（原先这里的 ${revision} 压过一切 DM）-->
         <dependency>
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-mcp-api</artifactId>
-            <version>${revision}</version>
         </dependency>
         <dependency>
             <groupId>org.springframework</groupId>

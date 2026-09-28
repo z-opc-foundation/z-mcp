@@ -18,17 +18,10 @@
     <name>z-mcp-starter</name>
     <description>Spring Boot 自动装配: ZMcpAutoConfiguration + spring.factories</description>
 
-    <properties>
-        <maven.compiler.source>8</maven.compiler.source>
-        <maven.compiler.target>8</maven.compiler.target>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    </properties>
-
     <dependencies>
         <dependency>
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-mcp-core</artifactId>
-            <version>${revision}</version>
         </dependency>
 
         <!--
@@ -39,7 +32,6 @@
         <dependency>
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-mcp-admin</artifactId>
-            <version>${revision}</version>
         </dependency>
 
         <dependency>
@@ -84,6 +76,17 @@
         <dependency>
             <groupId>org.junit.vintage</groupId>
             <artifactId>junit-vintage-engine</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- 地板那条 spring-boot-starter-logging 带 `<exclusions>*:*</exclusions>`
+             （z-boot-dependencies/pom.xml:500-510）⇒ 迁移后 logback 不再随 test 域的 starter-web 进来。
+             src/main 现读 0 处 logback，但 3 个测试类（ServerSideLogCapture 那一族，15 处引用）把尺架在
+             logback 的 LoggerContext 上 ⇒ 按 test 域复原，版本由父链下发（1.2.12，与基线同值）。
+             jul-to-slf4j / log4j-to-slf4j 不复原：全仓 0 处 java.util.logging、0 处 log4j。 -->
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
