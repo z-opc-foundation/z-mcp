@@ -252,6 +252,10 @@
                         <extensions>true</extensions>
                         <configuration>
                             <publishingServerId>central</publishingServerId>
+                            <!-- 缺这一行时 deploy 只会把 deployment 推到 validated 态(插件默认 autoPublish=false),
+                                 构件对外不可见, 而 Maven 一路报 BUILD SUCCESS。实测 deployment 6baf402c（0.2.0）就是
+                                 这样停在 VALIDATED、错误 0 却永远不公开。与其余 25 仓一致。 -->
+                            <autoPublish>true</autoPublish>
                         </configuration>
                     </plugin>
                 </plugins>
