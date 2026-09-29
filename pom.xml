@@ -78,14 +78,14 @@
              project.build.sourceEncoding=UTF-8、spring-boot.version=2.7.18。前两格在 6 个 pom 里
              没有别的引用点；spring-boot.version 只剩 z-mcp-server 那一处插件引用，键删、引用留着
              由父链解析（central_pom_scan 的 E 类不给"插件无版本"过关）。 -->
-        <revision>0.2.0</revision>
+        <revision>0.2.1</revision>
     </properties>
 
     <dependencyManagement>
         <dependencies>
             <!-- ===== 自家 reactor 坐标逐条钉 ${project.version} =====
-                 继承来的 fleet 把 z-mcp-api/core/starter/admin 钉在 repo1 的 **0.1.2**，而本仓
-                 <revision> 已是 0.2.0 ⇒ 不写这几条，仓内构建会被旧的对外面值反向污染（z-cache 试点
+                 继承来的 fleet 把 z-mcp-api/core/starter/admin 钉在 repo1 的旧对外面值，而本仓
+                 <revision> 已经往前走 ⇒ 不写这几条，仓内构建会被旧的对外面值反向污染（z-cache 试点
                  那格）。z-mcp-server 不在中央上（excludeArtifacts），但它是 reactor 成员，一并钉。 -->
             <dependency>
                 <groupId>io.github.yuku123</groupId>
@@ -161,9 +161,12 @@
             <!--
                 flatten-maven-plugin: 多模块项目发布到 Sonatype Central Portal 时,
                 根 POM 的元素(name/license/scm)不会被子模块继承, 必须用 flatten 把所有元信息注入到 .flattened-pom.xml
-                模式与版本不动（parent 那条 flatten 是 inherited=false，不下发）：现读 repo1 的 0.1.2 四份叶子
-                pom 的 <parent> 计数都是 1 ⇒ 本仓发的本来就是带 parent 链的扁平 pom，链子多一级
-                （z-mcp → z-boot-parent:1.0.19）是既有口径，那条新 parent 在 repo1 读得动由净室复跑证明。
+                模式与版本（parent 那条 flatten 是 inherited=false，不下发；插件版本留 1.7.2）。
+                flattenMode=oss（2026-09-29 从 resolveCiFriendliesOnly 改）：旧模式下五份叶子发布 pom
+                都留着 <parent>z-mcp</parent> 且依赖不带版本，外部工程要顺着 z-mcp → z-boot-parent →
+                z-boot-fleet 才能补齐版本 ⇒ 我们的 parent 链成了消费者的一部分。oss 把 parent 剥掉、
+                版本落成字面量，和 z-mq/z-cache/z-gw/z-llm 同形状（实测 z-agent 切 oss 后 name/url/
+                licenses/scm 由 flatten 从父链注入，不用逐模块补元信息）。
             -->
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
@@ -171,7 +174,7 @@
                 <version>1.7.2</version>
                 <configuration>
                     <updatePomFile>true</updatePomFile>
-                    <flattenMode>resolveCiFriendliesOnly</flattenMode>
+                    <flattenMode>oss</flattenMode>
                 </configuration>
                 <executions>
                     <execution>
