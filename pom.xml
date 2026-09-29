@@ -86,7 +86,13 @@
             <!-- ===== 自家 reactor 坐标逐条钉 ${project.version} =====
                  继承来的 fleet 把 z-mcp-api/core/starter/admin 钉在 repo1 的旧对外面值，而本仓
                  <revision> 已经往前走 ⇒ 不写这几条，仓内构建会被旧的对外面值反向污染（z-cache 试点
-                 那格）。z-mcp-server 不在中央上（excludeArtifacts），但它是 reactor 成员，一并钉。 -->
+                 那格）。z-mcp-server 也在中央上（本仓没有 excludeArtifacts，实测 repo1 的
+                 z-mcp-server/maven-metadata.xml 里 latest=0.2.0 且 0.2.0.pom ranged GET 206；
+                 更早的 0.1.2 那版确实没发，404）—— 它是 reactor 成员，所以这一格同样必须钉住。
+                 ⚠ 这句话在 8e12fdc 之前写的是"不在中央上（excludeArtifacts）"，那是错的口径，
+                 2026-09-29 点 bundle 时才现形：演练包里 z-mcp-server 的 pom+jar+sources+javadoc
+                 四件套齐。要不要把它改成像 z-indexer 那样用 excludeArtifacts 挡在门外，是
+                 "已经公开出去的坐标怎么收"的问题，另议，不在这一刀里顺手改。 -->
             <dependency>
                 <groupId>io.github.yuku123</groupId>
                 <artifactId>z-mcp</artifactId>
