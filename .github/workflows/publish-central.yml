@@ -43,6 +43,14 @@ jobs:
     runs-on: ubuntu-latest
     # 发布卡在半路(比如签名等 pinentry)不会自己结束; 不给上限就烧满默认 6 小时.
     timeout-minutes: 30
+    # 凭证必须挂在**作业级**而不是 setup-java 那一步的 env: 上 —— setup-java 写进 settings.xml 的是
+    # ${env.CENTRAL_USERNAME} / ${env.CENTRAL_TOKEN} 占位(它刻意不落明文), gpg-passphrase-env-var 也是
+    # 只写变量名到 gpg.passphraseEnvName。步骤级 env 只活那一步, deploy 时这三个变量已经没了,
+    # 症状是"secrets 明明配了却 401 / 签名等交互"。
+    env:
+      CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+      CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
+      GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -98,10 +106,6 @@ jobs:
           server-password-env-var: CENTRAL_TOKEN
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase-env-var: GPG_PASSPHRASE
-        env:
-          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
-          CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
 
       - name: mvn deploy -Pcentral
         # -pl 是白名单而不是可选优化: 根 pom 的 central profile 把 source/javadoc/gpg/central-publishing
