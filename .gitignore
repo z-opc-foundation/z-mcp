@@ -42,3 +42,8 @@ target/
 # OS
 .DS_Store
 Thumbs.db
+
+# ============ 临时/运行态产物 (002_项目文档收口规范: 一律写仓内 .cache/) ============
+/.cache/
+**/__pycache__/
+*.pyc
