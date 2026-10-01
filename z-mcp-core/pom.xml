@@ -51,11 +51,6 @@
             <artifactId>slf4j-api</artifactId>
         </dependency>
 
-        <dependency>
-            <groupId>junit</groupId>
-            <artifactId>junit</artifactId>
-            <scope>test</scope>
-        </dependency>
         <!-- MockHttpServletRequest: 传输层(状态码/头)可测, 不必起容器 -->
         <dependency>
             <groupId>org.springframework</groupId>

@@ -37,12 +37,5 @@
             <artifactId>javax.servlet-api</artifactId>
             <scope>provided</scope>
         </dependency>
-
-        <!-- 控制面报出去的每一个字段都要有测试钉住: 0.1.x 的 version/health 都是硬编码好话 -->
-        <dependency>
-            <groupId>junit</groupId>
-            <artifactId>junit</artifactId>
-            <scope>test</scope>
-        </dependency>
     </dependencies>
 </project>

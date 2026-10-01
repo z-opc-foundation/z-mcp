@@ -46,11 +46,6 @@
             <scope>provided</scope>
         </dependency>
 
-        <dependency>
-            <groupId>junit</groupId>
-            <artifactId>junit</artifactId>
-            <scope>test</scope>
-        </dependency>
 
         <!--
           ZMcpHttpEndpointTest 要起真 Tomcat: base-path / expose-admin 是"Spring 自己绑定"的两个字段,
@@ -72,11 +67,6 @@
                     <artifactId>junit-vintage-engine</artifactId>
                 </exclusion>
             </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>org.junit.vintage</groupId>
-            <artifactId>junit-vintage-engine</artifactId>
-            <scope>test</scope>
         </dependency>
 
         <!-- 地板那条 spring-boot-starter-logging 带 `<exclusions>*:*</exclusions>`
