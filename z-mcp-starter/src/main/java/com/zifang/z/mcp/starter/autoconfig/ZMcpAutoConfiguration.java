@@ -31,7 +31,13 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 @ConditionalOnProperty(name = "z.mcp.enabled", havingValue = "true", matchIfMissing = false)
 @EnableConfigurationProperties(McpProperties.class)
-@ComponentScan(basePackages = "com.zifang.z.mcp.core.controller")
+@ComponentScan(basePackages = {
+        "com.zifang.z.mcp.core.controller",
+        // 2026-10-03: bridge 包 (McpToolRegistryBindConfig, 把 McpRegistry 绑进宿主
+        // z-agent-center 的 ToolRegistry). 跟随 z.mcp.enabled 开关 —— 关掉时 McpRegistry
+        // 不存在, 桥接类本来就有 ObjectProvider 空转防御, 双保险.
+        "com.zifang.z.mcp.starter.bridge"
+})
 public class ZMcpAutoConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(ZMcpAutoConfiguration.class);

@@ -46,6 +46,17 @@
             <scope>provided</scope>
         </dependency>
 
+        <!-- 2026-10-03: bridge/McpToolRegistryBindConfig (自 z-opc main-starter 平移)
+             把本模块的 McpRegistry 绑进 z-agent-center 的 ToolRegistry (agent 工具表).
+             provided: 库不绑死宿主 —— 宿主 (z-opc) 装配时才有这个类,
+             ObjectProvider<McpRegistry> + getIfAvailable() 在无 agent-center 时空转. -->
+        <dependency>
+            <groupId>com.zifang</groupId>
+            <artifactId>z-agent-center-core</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+            <scope>provided</scope>
+        </dependency>
+
 
         <!--
           ZMcpHttpEndpointTest 要起真 Tomcat: base-path / expose-admin 是"Spring 自己绑定"的两个字段,
