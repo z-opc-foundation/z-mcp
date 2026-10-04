@@ -25,6 +25,39 @@
         </dependency>
 
         <!--
+          2026-10-04: z-mcp-starter 的 bridge/McpAliasController 用 com.zifang.util.core.meta.Result
+          作返回值信封(前端 /api/mcp/server/* 的统一响应体), 但本模块**从来没声明过** z-util-core ——
+          它只是靠 z-mcp-core 把 z-util-core 以 provided 作用域传递进来才编得过。
+
+          而 provided 不传递 ⇒ 任何依赖本 starter 的模块(仓内的 z-mcp-server, 以及真实宿主)
+          运行时类路径上都没有这个类, Spring 一实例化 McpAliasController 就炸:
+              NoClassDefFoundError: com/zifang/util/core/meta/Result
+          表现是整类用例集体 error(z-mcp-server 的 RolesTest 11 条 / BearerGateTest 5 条 /
+          HubAggregationTest 6 条, 连 PortOwnershipTest 那条"冲突必须是 bind 失败"都被它顶掉了)。
+
+          ⇒ 用什么就声明什么。版本由 parent 链的 fleet 下发(z-util.version),不写死。
+          exclusion 与 z-gw/z-gw-api 同款: z-util-core 自带 log4j-slf4j2-impl(slf4j 2.x 绑定),
+          本仓只走 Log4j2 + slf4j 1.7 那一支, 由 z-boot starter 侧供给。
+
+          ⚠ 这一格必须和下面那条 log4j-api 一起改, 不能只排不补:
+          z-util-core 的 pom 里**没有**直接声明 log4j-api, 它是靠 log4j-slf4j2-impl 传递带进来的。
+          排掉那个绑定, log4j-api 就跟着一起没了, 于是本模块自己的
+          bridge/McpToolRegistryBindConfig(LogManager.getLogger)在运行期炸:
+              NoClassDefFoundError: org/apache/logging/log4j/LogManager
+          排绑定 + 显式声明 log4j-api, 才是 org 里既有的做法(见 z-cache/z-cache-server)。
+        -->
+        <dependency>
+            <groupId>io.github.yuku123</groupId>
+            <artifactId>z-util-core</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.logging.log4j</groupId>
+                    <artifactId>log4j-slf4j2-impl</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!--
           控制面必须真的在 classpath 上, @ComponentScan("com.zifang.z.mcp.admin") 才扫得到东西.
           0.1.x 到 0.2.0 之间没有任何 pom 依赖过 z-mcp-admin, 于是 z.mcp.expose-admin=true
           扫的是一个不存在的包 ⇒ 静默什么都不挂载, 开关等于没有.
@@ -37,6 +70,21 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-autoconfigure</artifactId>
+        </dependency>
+
+        <!--
+          2026-10-04: bridge/McpToolRegistryBindConfig 用 org.apache.logging.log4j 的
+          LogManager/Logger, 但本仓从来没声明过 log4j —— 之前能跑是因为 z-util-core 传递带进来的
+          log4j-slf4j2-impl 顺手把 log4j-api 也拖进来了, 属于"搭便车"。上面把那格排掉之后,
+          搭便车的那趟车没了, 这个类就 NoClassDefFoundError 了。
+
+          ⇒ 显式声明本模块自己用到的那个。版本由 parent 链下发(实测 2.25.4),不写死。
+          只声明 api 不声明 core: 本仓是库不是应用, 实现由宿主的 log4j2 配置侧供给,
+          与 z-cache/z-cache-server 的做法一致。
+        -->
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-api</artifactId>
         </dependency>
 
         <!-- 装配要扫到 JsonRpcController, 它的签名里有 servlet 类型; 运行时由容器提供 -->
@@ -84,7 +132,11 @@
              （z-boot-dependencies/pom.xml:500-510）⇒ 迁移后 logback 不再随 test 域的 starter-web 进来。
              src/main 现读 0 处 logback，但 3 个测试类（ServerSideLogCapture 那一族，15 处引用）把尺架在
              logback 的 LoggerContext 上 ⇒ 按 test 域复原，版本由父链下发（1.2.12，与基线同值）。
-             jul-to-slf4j / log4j-to-slf4j 不复原：全仓 0 处 java.util.logging、0 处 log4j。 -->
+             jul-to-slf4j / log4j-to-slf4j 不复原：src/main 0 处 java.util.logging。
+             ⚠ 这句原来写的是"全仓 0 处 java.util.logging、0 处 log4j"，后半个"0 处 log4j"是错的：
+             bridge/McpToolRegistryBindConfig 用的就是 org.apache.logging.log4j 的 LogManager/Logger
+             （2026-10-04 更正，见上面那条 log4j-api 声明）。结论不变——两座桥仍不复原，
+             因为 src/main 只用 log4j 的 API，不经 jul/slf4j 桥。 -->
         <dependency>
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>

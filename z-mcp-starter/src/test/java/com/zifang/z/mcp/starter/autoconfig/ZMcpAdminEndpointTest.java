@@ -34,6 +34,15 @@ import static org.junit.Assert.assertTrue;
         classes = ZMcpAdminEndpointTest.App.class,
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
+                // 这批切片用例一个字节的 SQL 都不碰。本模块 pom 里 druid-spring-boot-starter /
+                // spring-boot-starter-jdbc / mysql-connector-j 都是 provided 作用域,宿主拿不到,
+                // 生产上没这个问题;但 provided 在**测试**类路径上,@EnableAutoConfiguration 会去
+                // 激活 DruidDataSourceAutoConfigure,而容器里没有任何数据源配置,启动期直接死在
+                // "Failed to determine a suitable driver class"。症状是整类用例集体 error
+                // (9 个类 52 条),而不是某一条断言红。处置与 z-report 的 EndToEndFlowTest#TestApp
+                // 一致(2026-10-04)。⚠ Boot 2.7 的 @SpringBootTest 没有 exclude 属性(javap 查过
+                // 2.7.18 的字节码:只有 value/properties/args/classes/webEnvironment),所以只能走属性。
+                "spring.autoconfigure.exclude=org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration,com.alibaba.druid.spring.boot.autoconfigure.DruidDataSourceAutoConfigure",
                 "z.mcp.enabled=true",
                 "z.mcp.expose-admin=true",
                 "z.mcp.base-path=/api/tenant-admin"

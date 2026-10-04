@@ -44,7 +44,11 @@
         <!-- 交付物是一个进程，日志实现得留在 compile 域：地板那条 spring-boot-starter-logging 带
              `<exclusions>*:*</exclusions>`（z-boot-dependencies/pom.xml:500-510）⇒ 迁移后 logback 不再
              随 starter-web 进来，fat jar 里没有 binding。自己按既有写法声明（不改地板），版本由父链下发
-             （1.2.12，与基线同值）。本仓 0 处 java.util.logging、0 处 log4j ⇒ 两座桥不复原。 -->
+             （1.2.12，与基线同值）。本仓 0 处 java.util.logging ⇒ 两座桥不复原。
+             ⚠ 这里原来写的是"本仓 0 处 java.util.logging、0 处 log4j"，后半个"0 处 log4j"是错的：
+             z-mcp-starter 的 bridge/McpToolRegistryBindConfig 用的就是 log4j 的 LogManager/Logger
+             （2026-10-04 更正）。结论不变——那座桥指的是 log4j-to-slf4j / jul-to-slf4j 的**桥接**，
+             本仓只直接用 log4j API，不需要桥。 -->
         <dependency>
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>
