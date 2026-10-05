@@ -99,7 +99,7 @@
              provided: 库不绑死宿主 —— 宿主 (z-opc) 装配时才有这个类,
              ObjectProvider<McpRegistry> + getIfAvailable() 在无 agent-center 时空转. -->
         <dependency>
-            <groupId>com.zifang</groupId>
+            <groupId>io.github.yuku123</groupId>
             <artifactId>z-agent-center-core</artifactId>
             <version>1.0.0-SNAPSHOT</version>
             <scope>provided</scope>
