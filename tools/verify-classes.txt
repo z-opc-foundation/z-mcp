@@ -1,0 +1,6 @@
+# z-mcp 要抽检的类：逐行 `<artifactId>:<该仓 sources.jar 内的路径>`
+# 路径以线上已发布件为准（用 unzip -l <sources.jar> 核对过），不是按源码树推的。
+# 这两项承自原 z-opc/z-middleware-integration-test 的 ZAgentAiL3StarterCentralPullIT
+# （该模块 2026-10-05 删除、测试归各仓）—— 它验的是「改名后类名/包路径是否都同步到了发布件」。
+z-mcp-core:com/zifang/z/mcp/core/controller/JsonRpcController.java
+z-mcp-starter:com/zifang/z/mcp/starter/autoconfig/ZMcpAutoConfiguration.java
