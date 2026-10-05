@@ -540,8 +540,11 @@ SPI）是跨仓的架构决定，不在本仓能自己动的范围里。
 
 * `z-boot/z-boot-fleet` 的 `<z-mcp.version>` 现钉 `0.2.1`，受管五枚 `z-mcp-*` 坐标；
 * `z-boot/z-boot-integration-starters/z-boot-mcp-starter` 直接依赖 `z-mcp-starter`；
-* `z-opc/z-middleware-integration-test` 依赖 `z-boot-mcp-starter`，其
-  `ZAgentAiL3StarterCentralPullIT` 从中央仓库拉构件并反射断言
+* ⚠ **本条闸门已随 `z-opc/z-middleware-integration-test` 删除而消失**（2026-10-05，
+  该模块把各中间件的发布件验证集中在 z-opc 里、位置不对，已删，测试归各仓）。
+  z-mcp 目前**还没有**自己的 Central 验证脚本（本仓既无 `_doc/003_script` 也无
+  `deploy_maven_center.sh`），要补可照搬 z-camuda 等仓的
+  `_doc/003_script/verify_central.sh`。下面是它原先验什么，供重建时对齐。
   `com.zifang.z.mcp.starter.autoconfig.ZMcpAutoConfiguration` 与
   `com.zifang.z.mcp.core.controller.JsonRpcController` 上的 `@PostMapping("/mcp")` ——
   也就是说**类名与那条映射已被跨仓用例钉住**，改名前要先改那里。
