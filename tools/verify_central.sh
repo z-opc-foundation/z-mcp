@@ -52,16 +52,31 @@ except Exception:
 m = re.search(r'<revision>([^<]+)</revision>', s)
 if m:
     print(m.group(1).strip()); sys.exit(0)
-# 无 ${revision} 的仓（如 z-boot：每工程自带字面 <version>）→ 取 parent 之后那个，
-# 也就是根工程自己的版本
-m = re.search(r'</parent>\s*(?:<!--.*?-->\s*)*<artifactId>[^<]+</artifactId>\s*<version>([^<]+)</version>', s, re.S)
-if not m:
-    m = re.search(r'<artifactId>[^<]+</artifactId>\s*<version>([^<]+)</version>', s)
-print(m.group(1).strip() if m else '')
+# 无 ${revision} 的仓：取**根工程自己的** <version>，也就是 <artifactId>本工程</> 紧跟的那个。
+# ⚠ 三个坑，逐个都真实踩过：
+#   ① 不能取第一个 <version> —— 那会命中 <parent> 里的（z-graph: parent 1.0.21 /
+#      根工程 1.0.8，误取 parent ⇒ 全表 404）
+#   ② 有的仓根 pom 的 <version> 字面就是自引用 ${project.version}（z-graph / z-gw / z-kb
+#      三个都是），字面解析到此为止 ⇒ 交给 mvn help:evaluate 兜底
+#   ③ 解析结果若仍含 ${ 就不算版本，直接报，不让它去 Central 探一圈 404 回来
+root_artifact = re.search(r'</parent>.*?<artifactId>([^<]+)</artifactId>', s, re.S)
+if root_artifact:
+    aid = re.escape(root_artifact.group(1).strip())
+    m = re.search(r'</parent>.*?<artifactId>' + aid + r'</artifactId>\s*<version>([^<]+)</version>', s, re.S)
+    if m and '${' not in m.group(1):
+        print(m.group(1).strip()); sys.exit(0)
+print('')   # 空 ⇒ 交给调用方走 mvn 兜底
 PY
 )
+    # 字面解析不出来（自引用 ${project.version}）⇒ 问 Maven 自己要
+    if [ -z "$VERSION" ]; then
+        VERSION=$(mvn -q help:evaluate -Dexpression=project.version -DforceStdout 2>/dev/null | tail -1 | tr -d '[:space:]')
+    fi
 fi
-[ -z "$VERSION" ] && { err "无法从 pom.xml 解析版本，请显式传参：./verify_central.sh <version>"; exit 1; }
+[ -z "$VERSION" ] && { err "无法解析本仓版本（pom 字面与 mvn 都问不出），请显式传参：./verify_central.sh <version>"; exit 1; }
+case "$VERSION" in
+    *'${'*) err "版本解析得到的是未展开的串 ${VERSION}；请显式传参 ./verify_central.sh <version>"; exit 1 ;;
+esac
 log "仓: $(basename "$REPO_ROOT")  版本: $VERSION  groupId: $GROUP_ID"
 
 # ---------- 构件清单 + packaging ----------

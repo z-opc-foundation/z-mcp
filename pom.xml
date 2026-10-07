@@ -281,6 +281,13 @@
                                  构件对外不可见, 而 Maven 一路报 BUILD SUCCESS。实测 deployment 6baf402c（0.2.0）就是
                                  这样停在 VALIDATED、错误 0 却永远不公开。与其余 25 仓一致。 -->
                             <autoPublish>true</autoPublish>
+                            <!-- 本插件不认 maven.deploy.skip，没排除的模块照样进 bundle
+                                 （实测结论见 z-schedule/pom.xml 同位置注释）⇒ 不可发布的模块点名列出。
+                              · z-mcp-admin：管理端可执行应用，只有主类 + 数据源配置，repackage 不带
+                                  classifier ⇒ 产物是执行 fat jar，不是别仓可引的库件。 -->
+                            <excludeArtifacts>
+                                <excludeArtifact>z-mcp-admin</excludeArtifact>
+                            </excludeArtifacts>
                         </configuration>
                     </plugin>
                 </plugins>
