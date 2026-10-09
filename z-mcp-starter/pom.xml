@@ -94,16 +94,14 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- 2026-10-03: bridge/McpToolRegistryBindConfig (自 z-opc main-starter 平移)
-             把本模块的 McpRegistry 绑进 z-agent-center 的 ToolRegistry (agent 工具表).
-             provided: 库不绑死宿主 —— 宿主 (z-opc) 装配时才有这个类,
-             ObjectProvider<McpRegistry> + getIfAvailable() 在无 agent-center 时空转. -->
-        <dependency>
-            <groupId>io.github.yuku123</groupId>
-            <artifactId>z-agent-center-core</artifactId>
-            <version>1.0.0-SNAPSHOT</version>
-            <scope>provided</scope>
-        </dependency>
+        <!-- 2026-10-09: bridge/McpToolRegistryBindConfig 改成反射调 z-agent-center 的
+             ToolRegistry (Class.forName("com.zifang.z.agent.center.core.agent.tool.ToolRegistry")),
+             本模块零 z-agent-center-core 依赖。原因 (旧版本 1.0.0-SNAPSHOT provided):
+               · SNAPSHOT 永远 404, 本仓 publish 不出去 (Central 拒收);
+               · provided 强迫下游必须把 z-agent-center-core 写进自己 DM, 库件越权;
+               · 该绑定 opt-in (宿主有 agent-center 时才生效), 不该硬绑版本号。
+             行为不变: @ConditionalOnClass(name=...) 守一道, 缺类时空转, 同时 bind() 里
+             Class.forName 失败二次防护。详见 bridge 类的 Javadoc §2026-10-09。 -->
 
 
         <!--
@@ -140,6 +138,19 @@
         <dependency>
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- 反射路径双向验证：bridge 的反射代码要调 z-agent-center-core 的 ToolRegistry,
+             所以 test scope 里把 z-agent-center-core 列上, 让 McpToolRegistryBindConfigTest
+             能走「class 在 classpath」的真路径（反射 + @ConditionalOnClass 双绿）,
+             也能在没有 z-agent-center-core 的常规下游环境里走「缺类空转」路径。
+             版本 1.0.1 = z-opc 仓本地面值, Central 暂无 (z-agent-center-core 走 z-opc reactor
+             消费, 不发中央), 写 test scope 严格不污染 src/main 的零依赖面。 -->
+        <dependency>
+            <groupId>io.github.yuku123</groupId>
+            <artifactId>z-agent-center-core</artifactId>
+            <version>1.0.1</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
