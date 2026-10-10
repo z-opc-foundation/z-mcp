@@ -10,7 +10,7 @@ export const menuItems = [
     { key: '/z-mcp/status', label: '服务状态', icon: <MonitorOutlined /> },
 ]
 
-export const routeTable = [
+export const routes = [
     { path: '/z-mcp/home', Component: HomePage },
     { path: '/z-mcp/status', Component: StatusPage },
 ]
