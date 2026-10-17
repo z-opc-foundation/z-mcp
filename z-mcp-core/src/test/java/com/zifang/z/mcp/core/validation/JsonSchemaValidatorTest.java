@@ -1,5 +1,6 @@
 package com.zifang.z.mcp.core.validation;
 
+import com.zifang.z.mcp.core.json.Wire;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.Test;
@@ -19,8 +20,9 @@ public class JsonSchemaValidatorTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private final JsonSchemaValidator validator = new JsonSchemaValidator();
 
-    private JsonNode json(String s) throws Exception {
-        return mapper.readTree(s);
+    // 同上: 校验器现在收的是 z-util 的树, 喂 Jackson 树会一路被判成"不配当 schema"。
+    private Object json(String s) throws Exception {
+        return Wire.readOrThrow(s);
     }
 
     private void assertOk(String schema, String instance) throws Exception {
@@ -65,6 +67,21 @@ public class JsonSchemaValidatorTest {
         assertFalse(errorsOf("{\"type\":\"number\",\"minimum\":1,\"maximum\":10}", "0.5").isEmpty());
         assertOk("{\"type\":\"number\",\"minimum\":1,\"maximum\":10}", "10");
         assertFalse(errorsOf("{\"type\":\"number\",\"minimum\":1,\"maximum\":10}", "11").isEmpty());
+    }
+
+    /**
+     * enum 里躺着 null 时, null 实例是**命中**的那一格。
+     * 迁移前 enum 的循环体第一句是 {@code if (value == null) return false;}, 在 Jackson 时代
+     * 恰好无事(null 读回来是 NullNode, 走不到); 换 z-util 后 JSON null 落成 Java null,
+     * 那句就把 null 实例一律判红, 连合法的 {@code {"enum":[null,"a"]}} 配 null 都会报错。
+     * 同一族里 {@code {"type":"null"}} 与 {@code {"const":null}} 都已经各有用例钉着, 这一格原先没有。
+     */
+    @Test
+    public void enum_can_hold_null_and_null_instance_matches_it() throws Exception {
+        assertOk("{\"enum\":[null,\"a\"]}", "null");
+        assertOk("{\"enum\":[null,\"a\"]}", "\"a\"");
+        assertFalse(errorsOf("{\"enum\":[null,\"a\"]}", "\"b\"").isEmpty());
+        assertFalse("0 不与 null 相等", errorsOf("{\"enum\":[null,\"a\"]}", "0").isEmpty());
     }
 
     @Test

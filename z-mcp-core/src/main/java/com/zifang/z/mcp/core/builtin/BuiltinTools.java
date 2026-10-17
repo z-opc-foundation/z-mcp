@@ -1,10 +1,10 @@
 package com.zifang.z.mcp.core.builtin;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zifang.z.mcp.api.dto.ContentBlock;
 import com.zifang.z.mcp.api.dto.McpResourceDto;
 import com.zifang.z.mcp.api.dto.McpToolDto;
 import com.zifang.z.mcp.api.dto.ToolAnnotations;
+import com.zifang.z.mcp.core.json.Wire;
 import com.zifang.z.mcp.core.properties.McpProperties;
 import com.zifang.z.mcp.core.registry.McpRegistry;
 
@@ -24,10 +24,10 @@ public final class BuiltinTools {
     private BuiltinTools() {}
 
     public static void registerAll(McpRegistry registry) {
-        registerAll(registry, new McpProperties(), new ObjectMapper());
+        registerAll(registry, new McpProperties());
     }
 
-    public static void registerAll(McpRegistry registry, McpProperties properties, final ObjectMapper mapper) {
+    public static void registerAll(McpRegistry registry, McpProperties properties) {
         final String version = properties.getServerVersion();
 
         registry.tool("echo")
@@ -81,7 +81,7 @@ public final class BuiltinTools {
                     return info;
                 });
 
-        registerIntrospectionResources(registry, properties, mapper);
+        registerIntrospectionResources(registry, properties);
     }
 
     /**
@@ -89,17 +89,15 @@ public final class BuiltinTools {
      * 这也是 capabilities.resources 不成为谎报的前提.
      */
     private static void registerIntrospectionResources(final McpRegistry registry,
-                                                       McpProperties properties,
-                                                       final ObjectMapper mapper) {
+                                                       McpProperties properties) {
         final String version = properties.getServerVersion();
         registry.registerResource(new McpResourceDto(
                 "z-mcp://tools", "MCP tools", "当前注册的全部工具及其 JSON Schema",
-                "application/json", args -> ContentBlock.text(mapper.writeValueAsString(snapshotTools(registry)))));
+                "application/json", args -> ContentBlock.text(Wire.write(snapshotTools(registry)))));
 
         registry.registerResource(new McpResourceDto(
                 "z-mcp://servers", "MCP servers", "已接入的外部 MCP server 及其工具数",
-                "application/json", args -> ContentBlock.text(mapper.writeValueAsString(
-                        registry.listServers()))));
+                "application/json", args -> ContentBlock.text(Wire.write(registry.listServers()))));
 
         registry.registerResource(new McpResourceDto(
                 "z-mcp://self", "Server info", "本 MCP server 的身份与协议支持",
@@ -111,7 +109,7 @@ public final class BuiltinTools {
                             com.zifang.z.mcp.core.protocol.McpSchema.SUPPORTED_VERSIONS);
                     m.put("toolCount", Integer.valueOf(registry.toolCount()));
                     return ContentBlock.resource("z-mcp://self", "application/json",
-                            mapper.writeValueAsString(m));
+                            Wire.write(m));
                 }));
     }
 

@@ -1,7 +1,6 @@
 package com.zifang.z.mcp.core.controller;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.zifang.z.mcp.core.json.Wire;
 import com.zifang.z.mcp.api.exception.McpException;
 import com.zifang.z.mcp.core.properties.McpProperties;
 import com.zifang.z.mcp.core.protocol.McpProtocolHandler;
@@ -57,17 +56,15 @@ public class JsonRpcController {
     private final McpProtocolHandler handler;
     private final McpSessionStore sessions;
     private final TransportSecurityGuard guard;
-    private final ObjectMapper mapper;
 
     public JsonRpcController(McpRegistry registry, McpProperties properties,
                              McpProtocolHandler handler, McpSessionStore sessions,
-                             TransportSecurityGuard guard, ObjectMapper mapper) {
+                             TransportSecurityGuard guard) {
         this.registry = registry;
         this.properties = properties;
         this.handler = handler;
         this.sessions = sessions;
         this.guard = guard;
-        this.mapper = mapper;
     }
 
     // ------------------------------------------------------------------ POST
@@ -127,34 +124,34 @@ public class JsonRpcController {
                     .body(errorBody(McpException.PARSE_ERROR, "cannot read request body"));
         }
 
-        JsonNode body;
+        Object body;
         try {
-            body = mapper.readTree(new String(raw, StandardCharsets.UTF_8));
+            body = Wire.readOrThrow(new String(raw, StandardCharsets.UTF_8));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(errorBody(McpException.PARSE_ERROR, "malformed JSON: " + e.getMessage()));
         }
-        if (body == null || body.isNull()) {
+        if (body == null) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(errorBody(McpException.PARSE_ERROR, "empty request body"));
         }
-        if (body.isArray()) {
+        if (Wire.isArray(body)) {
             // 批量请求在 2025-03-26 加入、2025-06-18 删除; 明确拒绝而不是静默处理第一个
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(errorBody(McpException.INVALID_REQUEST,
                             "batch requests are not supported since protocol revision 2025-06-18"));
         }
-        if (!body.isObject()) {
+        if (!Wire.isObject(body)) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(errorBody(McpException.INVALID_REQUEST, "request must be a JSON object"));
         }
 
         boolean isInitialize = McpSchema.M_INITIALIZE.equals(
-                body.path("method").asText());
+                Wire.asText(Wire.get(body, "method")));
 
         // 5) 会话解析
         McpSessionStore.McpSession session = null;
@@ -428,7 +425,7 @@ public class JsonRpcController {
     private String replyBody(McpProtocolHandler.Reply reply) {
         if (reply.envelope == null) return "";
         try {
-            return mapper.writeValueAsString(reply.envelope.toWire());
+            return Wire.write(reply.envelope.toWire());
         } catch (Exception e) {
             log.error("failed to serialize JSON-RPC response", e);
             return "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,"
@@ -445,7 +442,7 @@ public class JsonRpcController {
         body.put("id", null);
         body.put("error", err);
         try {
-            return mapper.writeValueAsString(body);
+            return Wire.write(body);
         } catch (Exception e) {
             return "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600}}";
         }

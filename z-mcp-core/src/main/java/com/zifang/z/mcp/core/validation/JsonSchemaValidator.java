@@ -1,9 +1,9 @@
 package com.zifang.z.mcp.core.validation;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.TextNode;
 
+import com.zifang.z.mcp.core.json.Wire;
 import java.io.ByteArrayOutputStream;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -106,19 +106,89 @@ import java.util.regex.PatternSyntaxException;
  */
 public class JsonSchemaValidator {
 
+    // 下面这组私有转发是为了让校验逻辑本身读起来仍像"在树上走", 而不把 Wire.xxx 包一层
+    // 写进每一处判定里。语义全部委托给 {@link Wire}, 本类不重述任何一条规则。
+
+    private static Object get(Object node, String field) {
+        return Wire.get(node, field);
+    }
+
+    private static Object get(Object node, int index) {
+        return Wire.get(node, index);
+    }
+
+    private static boolean hasKey(Object node, String field) {
+        return Wire.hasKey(node, field);
+    }
+
+    private static boolean isNull(Object v) {
+        return v == null;
+    }
+
+    private static boolean isObject(Object v) {
+        return Wire.isObject(v);
+    }
+
+    private static boolean isArray(Object v) {
+        return Wire.isArray(v);
+    }
+
+    private static boolean isTextual(Object v) {
+        return Wire.isTextual(v);
+    }
+
+    private static boolean isBoolean(Object v) {
+        return Wire.isBoolean(v);
+    }
+
+    private static boolean isNumber(Object v) {
+        return Wire.isNumber(v);
+    }
+
+    private static boolean isIntegral(Object v) {
+        return Wire.isIntegral(v);
+    }
+
+    private static String asText(Object v) {
+        return Wire.asText(v);
+    }
+
+    private static Double asDouble(Object v) {
+        return Wire.asDouble(v);
+    }
+
+    private static Boolean asBoolean(Object v) {
+        return Wire.asBoolean(v);
+    }
+
+    /**
+     * 精确十进制视图 —— 替 {@code JsonNode.decimalValue()}。
+     *
+     * <p>溢出成 Infinity 的数值在这一步抛 {@link NumberFormatException}, 与 Jackson 同读数,
+     * 调用方靠捕获它退回按 double 比(见 {@link #sameNumber})。
+     */
+    private static BigDecimal decimalValue(Object v) {
+        return Wire.decimal(v);
+    }
+
+    /** 数组长度 / 对象字段数, 替 {@code JsonNode.size()}。 */
+    private static int size(Object v) {
+        return Wire.size(v);
+    }
+
     /** @return 违规描述列表, 空表示通过. */
-    public List<String> validate(JsonNode schema, JsonNode instance) {
+    public List<String> validate(Object schema, Object instance) {
         List<String> errors = new ArrayList<String>();
         // 没有 schema (上游压根没声明) 与"声明了一个不配当 schema 的东西"是两回事:
         // 前者不作约束, 后者按"认得就必须给确定结论"的政策一律红 —— ajv 在这一步是直接抛
         // ("schema must be object or boolean"), jsonschema 同样拒绝 (ref48_bogus_schema_*.log).
         // 这一条不再在这里重复判: walk() 顶层与嵌套同用一枚闸.
-        if (schema == null || schema.isNull()) return errors;
+        if (schema == null || isNull(schema)) return errors;
         walk(schema, instance, "$", new Ctx(schema), errors);
         return errors;
     }
 
-    public boolean isValid(JsonNode schema, JsonNode instance) {
+    public boolean isValid(Object schema, Object instance) {
         return validate(schema, instance).isEmpty();
     }
 
@@ -127,22 +197,22 @@ public class JsonSchemaValidator {
      * 两条并发请求不能看见彼此的 ref 展开栈.
      */
     private static final class Ctx {
-        final JsonNode root;
+        final Object root;
         /** 当前分支上正在展开的 "$ref 串 @ 实例路径"; 再次撞见同一个组合就是原地打转. */
         final Set<String> expanding = new LinkedHashSet<String>();
 
-        Ctx(JsonNode root) {
+        Ctx(Object root) {
             this.root = root;
         }
     }
 
-    private void walk(JsonNode schema, JsonNode node, String path, Ctx ctx, List<String> errors) {
+    private void walk(Object schema, Object node, String path, Ctx ctx, List<String> errors) {
         // 一份 schema 只能是对象或布尔, 顶层与**任何一层**都同这一条闸: 嵌套位置原先没人管,
         // 于是 {"items":["nope"]} 这种"该是 schema 的地方长了别的东西"会一路走到元素检查里
         // 什么关键字都取不到 ⇒ 静默放行. 四份参照在这格上互不一致 (ref49_tuple_oracle.log 与
         // ref49_tuple_oracle_py.log: 两份 draft-07 参照 VALID, ajv-2020 编译期抛,
         // jsonschema-2020 直接 AttributeError 崩) ⇒ 没有"照抄参照"这条路, 按政策 fail closed.
-        if (!schema.isBoolean() && !schema.isObject()) {
+        if (!isBoolean(schema) && !isObject(schema)) {
             errors.add(path + ": a schema must be an object or a boolean but is "
                     + jsonType(schema) + " " + literal(schema) + ", refusing to treat it as no constraint");
             return;
@@ -150,21 +220,21 @@ public class JsonSchemaValidator {
         // 布尔 schema 是最小的那一种约束: true 恒过, false 恒不过.
         // 两份参照校验器都认它 (ref48_bool_schema.log: #/definitions/X 这种非标准容器
         // 也照样按 JSON Pointer 解出来 —— 指针解析与关键字叫什么无关).
-        if (schema.isBoolean()) {
-            if (!schema.asBoolean()) {
+        if (isBoolean(schema)) {
+            if (!asBoolean(schema)) {
                 errors.add(path + ": value " + literal(node) + " rejected by an always-false schema");
             }
             return;
         }
 
-        JsonNode ref = schema.get("$ref");
+        Object ref = get(schema, "$ref");
         if (ref != null) {
-            JsonNode target = resolveRef(ref, ctx, path, errors);
+            Object target = resolveRef(ref, ctx, path, errors);
             if (target == null) return;
-            String key = ref.asText() + "@" + path;
+            String key = asText(ref) + "@" + path;
             if (!ctx.expanding.add(key)) {
                 // 实例没往前走而 schema 又回到同一处: 参照实现在这里直接爆栈, 我们要一条判定
-                errors.add(path + ": $ref " + ref.asText() + " recurs onto the same instance position"
+                errors.add(path + ": $ref " + asText(ref) + " recurs onto the same instance position"
                         + " without consuming it, refusing to expand further");
                 return;
             }
@@ -176,8 +246,8 @@ public class JsonSchemaValidator {
             // 2026-06 起 $ref 明确"像 allOf 一样、不吞同级关键字"; 实测 ajv 也是同级照算
         }
 
-        if (schema.has("enum") && !inEnum(schema.get("enum"), node)) {
-            errors.add(path + ": value " + literal(node) + " not in enum " + schema.get("enum"));
+        if (hasKey(schema, "enum") && !inEnum(get(schema, "enum"), node)) {
+            errors.add(path + ": value " + literal(node) + " not in enum " + get(schema, "enum"));
         }
         // const 与 enum 是两条独立关键字, 用的是同一套 JSON 相等 (1 与 1.0 同值, 而 1 不等于 true、
         // 0 不等于 False, 对象与键序无关而数组与次序有关). 真值: ajv 8.20.0 的 27 格 × 双方言
@@ -188,40 +258,43 @@ public class JsonSchemaValidator {
         // 四方向交集里唯一的分叉是 prefixItems 那一格 (draft-07 不认这个关键字 ⇒ VALID; 2020-12 认
         // ⇒ RED): 那是**方言差**不是实现差, 我们按 #49 立下的"认得就管"站 2020-12 那一侧.
         // 排在 type 那条提前 return **之前**: 参照在两支都不合时交两条违规 ("must be string |
-        // must be equal to constant"), 排后面就再也问不到常量. {"const":null} 也照样参与判定 ——
-        // 实测 has() 对显式 null 返回 true, 所以这里取 get() 不为绕 has(), 只是少一次查找.
-        JsonNode constant = schema.get("const");
-        if (constant != null && !jsonEquals(constant, node)) {
+        // must be equal to constant"), 排后面就再也问不到常量. {"const":null} 也照样参与判定。
+        //
+        // 所以在场判据是 hasKey 而不是 `get(...) != null`: 那句在 Jackson 时代能成立, 因为显式 null
+        // 读回来是个非空的 NullNode; z-util 把 JSON null 落成 Java null, 同一个判据会把
+        // {"const":null} 整个看成"没写 const" ⇒ 拿值 0 去配也放行。原先注释里"取 get() 不为绕
+        // has(), 只是少一次查找"记的正是这个被 NullNode 掩盖着的洞。
+        Object constant = get(schema, "const");
+        if (hasKey(schema, "const") && !jsonEquals(constant, node)) {
             errors.add(path + ": value " + literal(node) + " is not the constant " + literal(constant));
         }
 
-        JsonNode typeNode = schema.get("type");
+        Object typeNode = get(schema, "type");
         if (typeNode != null) {
-            if (typeNode.isArray()) {
+            if (isArray(typeNode)) {
                 boolean any = false;
-                for (JsonNode t : typeNode) if (matchesType(t.asText(), node)) { any = true; break; }
+                for (Object t : Wire.elements(typeNode)) if (matchesType(asText(t), node)) { any = true; break; }
                 if (!any) {
                     errors.add(path + ": expected one of " + typeNode + " but got " + jsonType(node));
                     return;
                 }
-            } else if (!matchesType(typeNode.asText(), node)) {
-                errors.add(path + ": expected type " + typeNode.asText() + " but got " + jsonType(node));
+            } else if (!matchesType(asText(typeNode), node)) {
+                errors.add(path + ": expected type " + asText(typeNode) + " but got " + jsonType(node));
                 return;
             }
         }
 
-        if (schema.has("nullable") && schema.get("nullable").isBoolean()
-                && schema.get("nullable").asBoolean() && node != null && node.isNull()) {
+        if (Boolean.TRUE.equals(Wire.asBoolean(get(schema, "nullable"))) && isNull(node)) {
             return;
         }
 
-        if (node != null && node.isObject()) {
+        if (node != null && isObject(node)) {
             checkObject(schema, node, path, ctx, errors);
-        } else if (node != null && node.isArray()) {
+        } else if (node != null && isArray(node)) {
             checkArray(schema, node, path, ctx, errors);
-        } else if (node != null && node.isTextual()) {
+        } else if (node != null && isTextual(node)) {
             checkString(schema, node, path, errors);
-        } else if (node != null && node.isNumber()) {
+        } else if (node != null && isNumber(node)) {
             checkNumber(schema, node, path, errors);
         }
 
@@ -229,42 +302,42 @@ public class JsonSchemaValidator {
     }
 
     /** allOf 逐条把违规直接记进主列表; anyOf/oneOf/not 只看"匹配得上吗", 分支内部不外溢. */
-    private void checkCombinators(JsonNode schema, JsonNode node, String path, Ctx ctx,
+    private void checkCombinators(Object schema, Object node, String path, Ctx ctx,
                                   List<String> errors) {
-        JsonNode all = schema.get("allOf");
-        if (all != null && all.isArray()) {
-            for (JsonNode branch : all) walk(branch, node, path, ctx, errors);
+        Object all = get(schema, "allOf");
+        if (all != null && isArray(all)) {
+            for (Object branch : Wire.elements(all)) walk(branch, node, path, ctx, errors);
         }
-        JsonNode any = schema.get("anyOf");
-        if (any != null && any.isArray()) {
+        Object any = get(schema, "anyOf");
+        if (any != null && isArray(any)) {
             int matched = countMatches(any, node, path, ctx);
             if (matched == 0) {
                 errors.add(path + ": value " + literal(node) + " does not match any subschema of anyOf"
-                        + " (" + any.size() + " branches)");
+                        + " (" + size(any) + " branches)");
             }
         }
-        JsonNode one = schema.get("oneOf");
-        if (one != null && one.isArray()) {
+        Object one = get(schema, "oneOf");
+        if (one != null && isArray(one)) {
             int matched = countMatches(one, node, path, ctx);
             if (matched != 1) {
-                errors.add(path + ": value " + literal(node) + " matches " + matched + " of " + one.size()
+                errors.add(path + ": value " + literal(node) + " matches " + matched + " of " + size(one)
                         + " subschemas but oneOf requires exactly 1");
             }
         }
-        JsonNode neg = schema.get("not");
-        if (neg != null && !neg.isNull() && matches(neg, node, path, ctx)) {
+        Object neg = get(schema, "not");
+        if (neg != null && !isNull(neg) && matches(neg, node, path, ctx)) {
             errors.add(path + ": value " + literal(node) + " is not allowed by the not subschema");
         }
     }
 
-    private int countMatches(JsonNode branches, JsonNode node, String path, Ctx ctx) {
+    private int countMatches(Object branches, Object node, String path, Ctx ctx) {
         int matched = 0;
-        for (JsonNode branch : branches) if (matches(branch, node, path, ctx)) matched++;
+        for (Object branch : Wire.elements(branches)) if (matches(branch, node, path, ctx)) matched++;
         return matched;
     }
 
     /** 分支只回答"合不合得上", 不合时它内部那几条码在何处由调用方决定. */
-    private boolean matches(JsonNode sub, JsonNode node, String path, Ctx ctx) {
+    private boolean matches(Object sub, Object node, String path, Ctx ctx) {
         List<String> scratch = new ArrayList<String>();
         walk(sub, node, path, ctx, scratch);
         return scratch.isEmpty();
@@ -274,19 +347,19 @@ public class JsonSchemaValidator {
      * 解析文档内指针. 返回 null 表示"这条 ref 给不出结论", 此时**已经**记了一条违规 ——
      * 解不开的 ref 不等于没有约束.
      */
-    private JsonNode resolveRef(JsonNode ref, Ctx ctx, String path, List<String> errors) {
-        if (!ref.isTextual()) {
+    private Object resolveRef(Object ref, Ctx ctx, String path, List<String> errors) {
+        if (!isTextual(ref)) {
             errors.add(path + ": $ref must be a string but is " + literal(ref));
             return null;
         }
-        String uri = ref.asText();
+        String uri = asText(ref);
         if (!uri.startsWith("#")) {
             errors.add(path + ": cannot resolve $ref " + uri + " — only in-document JSON pointers"
                     + " are followed, remote refs are never fetched");
             return null;
         }
         String pointer = uri.substring(1);
-        JsonNode target = ctx.root;
+        Object target = ctx.root;
         if (!pointer.isEmpty()) {
             if (!pointer.startsWith("/")) {
                 errors.add(path + ": cannot resolve $ref " + uri
@@ -296,22 +369,22 @@ public class JsonSchemaValidator {
             for (String segment : pointer.substring(1).split("/", -1)) {
                 String key = unescapeSegment(percentDecode(segment));
                 if (target == null) return reportMissing(ref, path, errors);
-                if (target.isObject()) {
-                    target = target.get(key);
-                } else if (target.isArray()) {
+                if (isObject(target)) {
+                    target = get(target, key);
+                } else if (isArray(target)) {
                     Integer idx = index(key);
-                    target = idx == null || idx < 0 || idx >= target.size() ? null : target.get(idx);
+                    target = idx == null || idx < 0 || idx >= size(target) ? null : get(target, idx);
                 } else {
                     return reportMissing(ref, path, errors);
                 }
             }
         }
-        if (target == null || target.isNull()) return reportMissing(ref, path, errors);
+        if (target == null || isNull(target)) return reportMissing(ref, path, errors);
         return target;
     }
 
-    private JsonNode reportMissing(JsonNode ref, String path, List<String> errors) {
-        errors.add(path + ": $ref " + ref.asText() + " resolves to nothing in this schema");
+    private Object reportMissing(Object ref, String path, List<String> errors) {
+        errors.add(path + ": $ref " + asText(ref) + " resolves to nothing in this schema");
         return null;
     }
 
@@ -353,41 +426,37 @@ public class JsonSchemaValidator {
         return new String(bytes.toByteArray(), StandardCharsets.UTF_8);
     }
 
-    private void checkObject(JsonNode schema, JsonNode node, String path, Ctx ctx,
+    private void checkObject(Object schema, Object node, String path, Ctx ctx,
                              List<String> errors) {
-        JsonNode required = schema.get("required");
-        if (required != null && required.isArray()) {
-            for (JsonNode r : required) {
-                String key = r.asText();
-                JsonNode child = node.get(key);
-                if (child == null || child.isNull()) {
+        Object required = get(schema, "required");
+        if (required != null && isArray(required)) {
+            for (Object r : Wire.elements(required)) {
+                String key = asText(r);
+                Object child = get(node, key);
+                if (child == null || isNull(child)) {
                     errors.add(path + ": missing required property '" + key + "'");
                 }
             }
         }
-        JsonNode props = schema.get("properties");
-        if (props != null && props.isObject()) {
-            Iterator<String> it = props.fieldNames();
-            while (it.hasNext()) {
-                String key = it.next();
-                if (node.has(key)) walk(props.get(key), node.get(key), path + "." + key, ctx, errors);
+        Object props = get(schema, "properties");
+        if (props != null && isObject(props)) {
+            for (String key : Wire.fieldNames(props)) {
+                if (hasKey(node, key)) walk(get(props, key), get(node, key), path + "." + key, ctx, errors);
             }
         }
         // 被任一 pattern 盖住的键. 它有两个用处: patternProperties 自己的判定, 以及**下一支**
         // additionalProperties 那两条的适用范围 —— 规范里 "additional" 指的是既不在 properties 里、
         // 也没被 patternProperties 盖住的那些键, 漏掉后半句就会把合法调用判成非法 (见下面的注释).
         Set<String> patternCovered = new LinkedHashSet<String>();
-        JsonNode patterns = schema.get("patternProperties");
-        if (patterns != null && !patterns.isNull()) {
+        Object patterns = get(schema, "patternProperties");
+        if (patterns != null && !isNull(patterns)) {
             // 显式 null 当作没写, 与上面 items / 下面 additionalItems 那几支同一口径 (那儿的
             // "关键字配了不配当值的类型"一格四份参照互不一致, 所以走政策而不是照抄某一家).
-            if (!patterns.isObject()) {
+            if (!isObject(patterns)) {
                 errors.add(path + ": patternProperties must be an object of schemas but is "
                         + jsonType(patterns) + " " + literal(patterns) + ", refusing to guess");
             } else {
-                Iterator<String> pit = patterns.fieldNames();
-                while (pit.hasNext()) {
-                    String regex = pit.next();
+                for (String regex : Wire.fieldNames(patterns)) {
                     Pattern compiled;
                     try {
                         compiled = Pattern.compile(regex);
@@ -398,40 +467,34 @@ public class JsonSchemaValidator {
                     // find() 而不是 matches(): patternProperties 的 pattern 是**不锚定**的, 与 checkString
                     // 里那支 pattern 同一个口径. 四份参照同判 (ref53 两份日志的 unanchored pattern
                     // substring key: 键 "xk_a" 落在 /k_/ 里 ⇒ 该键受约束 ⇒ RED).
-                    Iterator<String> kit = node.fieldNames();
-                    while (kit.hasNext()) {
-                        String key = kit.next();
+                    for (String key : Wire.fieldNames(node)) {
                         if (compiled.matcher(key).find()) {
                             patternCovered.add(key);
-                            walk(patterns.get(regex), node.get(key), path + "." + key, ctx, errors);
+                            walk(get(patterns, regex), get(node, key), path + "." + key, ctx, errors);
                         }
                     }
                 }
             }
         }
-        JsonNode additional = schema.get("additionalProperties");
-        if (additional != null && additional.isBoolean() && !additional.asBoolean()) {
-            Iterator<String> it = node.fieldNames();
-            while (it.hasNext()) {
-                String key = it.next();
-                if ((props == null || !props.has(key)) && !patternCovered.contains(key)) {
+        Object additional = get(schema, "additionalProperties");
+        if (additional != null && isBoolean(additional) && !asBoolean(additional)) {
+            for (String key : Wire.fieldNames(node)) {
+                if ((props == null || !hasKey(props, key)) && !patternCovered.contains(key)) {
                     errors.add(path + ": unknown property '" + key + "' not allowed");
                 }
             }
-        } else if (additional != null && additional.isObject()) {
+        } else if (additional != null && isObject(additional)) {
             // pydantic 的 Dict[str, X] 就是这个形状: 约束不在 properties 里, 在
             // additionalProperties 这份 **schema** 里 (两份参照校验器都判它有效,
             // 见 ref48_dict_probe.py 与 ref48_ajv_oracle.log).
-            Iterator<String> it = node.fieldNames();
-            while (it.hasNext()) {
-                String key = it.next();
-                if ((props == null || !props.has(key)) && !patternCovered.contains(key)) {
-                    walk(additional, node.get(key), path + "." + key, ctx, errors);
+            for (String key : Wire.fieldNames(node)) {
+                if ((props == null || !hasKey(props, key)) && !patternCovered.contains(key)) {
+                    walk(additional, get(node, key), path + "." + key, ctx, errors);
                 }
             }
         }
-        JsonNode names = schema.get("propertyNames");
-        if (names != null && !names.isNull()) {
+        Object names = get(schema, "propertyNames");
+        if (names != null && !isNull(names)) {
             // 键本身当字符串实例再过一遍这份子 schema. 这一族**两侧生产者都交得出来**, 而且是两条
             // 不同的路: python 那侧 pydantic 2.12.5 的 Dict[Literal['a','b'], int] 交
             // {"propertyNames":{"enum":["a","b"]}}, Dict[Color,int] 交 {"propertyNames":{"$ref":...}}
@@ -441,13 +504,11 @@ public class JsonSchemaValidator {
             // ON_WIRE patternProperties=0 / propertyNames=5), 它把约束键 record 表达成
             // {"propertyNames":{"type":"string","pattern":"^k_"},"additionalProperties":{值 schema}}
             // ⇒ 这一族里 propertyNames 是唯一两侧都上得了线的关键字.
-            Iterator<String> it = node.fieldNames();
-            while (it.hasNext()) {
-                String key = it.next();
-                walk(names, TextNode.valueOf(key), path + "." + key, ctx, errors);
+            for (String key : Wire.fieldNames(node)) {
+                walk(names, key, path + "." + key, ctx, errors);
             }
         }
-        JsonNode minProps = schema.get("minProperties");
+        Object minProps = get(schema, "minProperties");
         // 值不配当数字时不参与 (与 #51 在 strict*Bound 上定的政策同一条): 这一格四份参照都是
         // "没法给判决" —— ajv 与 jsonschema 都在 compile/check_schema 阶段拒掉整份 schema
         // (ref53 两份日志的 maxProperties string value 那行). 不比 #52 那三格更糟, 也不照抄.
@@ -458,18 +519,18 @@ public class JsonSchemaValidator {
         // isNumber() + 比 double. 当时"旁边的 minItems / maxLength 那一族没量过, 不跟着改"这句
         // 只写了半天 —— #54 把那一族量了 (56 格网格) 并且**同样**放宽了闸, 因为四份参照在
         // {"maxItems":1.5} 配 [1,2] 上也是同判红; 见 checkArray / checkString.
-        if (minProps != null && minProps.isNumber() && node.size() < minProps.asDouble()) {
+        if (minProps != null && isNumber(minProps) && size(node) < asDouble(minProps)) {
             errors.add(path + ": expected at least " + literal(minProps) + " properties");
         }
-        JsonNode maxProps = schema.get("maxProperties");
-        if (maxProps != null && maxProps.isNumber() && node.size() > maxProps.asDouble()) {
+        Object maxProps = get(schema, "maxProperties");
+        if (maxProps != null && isNumber(maxProps) && size(node) > asDouble(maxProps)) {
             errors.add(path + ": expected at most " + literal(maxProps) + " properties");
         }
     }
 
-    private void checkArray(JsonNode schema, JsonNode node, String path, Ctx ctx,
+    private void checkArray(Object schema, Object node, String path, Ctx ctx,
                             List<String> errors) {
-        JsonNode minItems = schema.get("minItems");
+        Object minItems = get(schema, "minItems");
         // 与 #53 在 min/maxProperties 上定的口径拉平: 这一族两支上一版写的都是 isInt(), 于是
         // {"maxItems":1.5} 遇 [1,2] 被判成"值不配当整数所以不参与"⇒ 绿, 而四份参照在这一格同判红
         // (网格第 29 格 maxItems float value violated side: ajv 与 jsonschema 都按数值比较算 2 > 1.5)。
@@ -477,14 +538,14 @@ public class JsonSchemaValidator {
         // 下界只有 minItems 的"合上侧" (第 30 格 VALID) 与 minLength 的"违例侧" (第 28 格),
         // 而 {"minItems":2.5} 遇 [1,2] 这一格没进网格 ⇒ 那一支的判定是我们的立场, 不是照抄.
         // 值不配当数字时仍不参与 (#51 那条政策; 生产者交不出这种界, 见 ref54_len_wire.log B 段)。
-        if (minItems != null && minItems.isNumber() && node.size() < minItems.asDouble()) {
+        if (minItems != null && isNumber(minItems) && size(node) < asDouble(minItems)) {
             errors.add(path + ": expected at least " + literal(minItems) + " items");
         }
-        JsonNode maxItems = schema.get("maxItems");
-        if (maxItems != null && maxItems.isNumber() && node.size() > maxItems.asDouble()) {
+        Object maxItems = get(schema, "maxItems");
+        if (maxItems != null && isNumber(maxItems) && size(node) > asDouble(maxItems)) {
             errors.add(path + ": expected at most " + literal(maxItems) + " items");
         }
-        JsonNode uniqueItems = schema.get("uniqueItems");
+        Object uniqueItems = get(schema, "uniqueItems");
         // 放在 items / prefixItems 那几支的 return **之前**: 互异与位置约束无关。"位置子 schema 里
         // 也有互异"那两格 (ref52 两份日志的 inside items schema / over tuple-shaped items) 四份参照
         // 同判重复; 数组形式 items 本身当位置用的那一格 (inside tuple items array) 只有 draft-07 那
@@ -497,27 +558,27 @@ public class JsonSchemaValidator {
         // 这三格是 #52 里唯一"跨实现、同方言"分叉的一族 (ref52_crossdiff.py 现算: 共有 106 格里
         // 只有这 3 格分叉), 没有可照抄的一致读数, 所以沿用 #51 在同一类问题上定的政策:
         // 值不配当这个关键字的类型 ⇒ 不参与, 既不抛也不当真值.
-        if (uniqueItems != null && uniqueItems.isBoolean() && uniqueItems.asBoolean()) {
+        if (uniqueItems != null && isBoolean(uniqueItems) && asBoolean(uniqueItems)) {
             int[] dup = firstDuplicate(node);
             if (dup != null) {
                 errors.add(path + ": items ## " + dup[0] + " and " + dup[1]
                         + " are identical but uniqueItems is true");
             }
         }
-        JsonNode items = schema.get("items");
-        JsonNode prefix = schema.get("prefixItems");
-        JsonNode additional = schema.get("additionalItems");
+        Object items = get(schema, "items");
+        Object prefix = get(schema, "prefixItems");
+        Object additional = get(schema, "additionalItems");
 
-        if (prefix != null && !prefix.isNull()) {
+        if (prefix != null && !isNull(prefix)) {
             // 2020-12 的元组写法: 位置约束住在 prefixItems 里, 尾巴归 items.
             // prefixItems 不是数组时两份 2020-12 参照一个抛一个崩, 两份 draft-07 参照看不见它而放行
             // ⇒ 没有可照抄的读数, 按政策给确定结论 (ref49_tuple_oracle.log / _py.log 的 policy 行).
-            if (!prefix.isArray()) {
+            if (!isArray(prefix)) {
                 errors.add(path + ": prefixItems must be an array of schemas but is "
                         + jsonType(prefix) + " " + literal(prefix) + ", refusing to guess");
                 return;
             }
-            if (items != null && items.isArray()) {
+            if (items != null && isArray(items)) {
                 // 两种元组写法同时出现时它们互相矛盾 (谁管尾巴都不成立), 参照之间也各说各话.
                 errors.add(path + ": prefixItems and an array-form items are both present,"
                         + " refusing to guess which tuple spelling governs");
@@ -525,10 +586,10 @@ public class JsonSchemaValidator {
             }
             checkPositions(prefix, node, path, ctx, errors);
             // 四份参照对 "prefixItems + additionalItems" 一律 VALID: 尾巴只由 items 管.
-            checkTail(items, node, path, prefix.size(), ctx, errors, "items");
+            checkTail(items, node, path, size(prefix), ctx, errors, "items");
             return;
         }
-        if (items != null && items.isArray()) {
+        if (items != null && isArray(items)) {
             // draft-07 的元组写法, 也是**真客户端实际交来的那一种**: 官方 TS SDK 自己的校验器
             // 是裸 draft-07 ajv (node_modules/@modelcontextprotocol/sdk/dist/cjs/
             // validation/ajv-provider.js: new Ajv({strict:false, validateFormats:true,
@@ -537,61 +598,61 @@ public class JsonSchemaValidator {
             // (ref48_zod_probe.log 的 tuple 两行) —— 连 target 选 2020-12 时也是这一种, 而那一种
             // 字节在真 2020-12 校验器里编译不过. 所以这里不按方言分派, 认得就管.
             checkPositions(items, node, path, ctx, errors);
-            checkTail(additional, node, path, items.size(), ctx, errors, "additionalItems");
+            checkTail(additional, node, path, size(items), ctx, errors, "additionalItems");
             return;
         }
-        if (items != null && !items.isNull()) {
+        if (items != null && !isNull(items)) {
             // 一份 schema 管所有元素. 布尔子 schema 两份参照都认 (ref48_bool_schema.log
             // 量了顶层、properties 里、$ref 指进去三个位置), 所以交给 walk() 的布尔分支.
             // 此时并行的 additionalItems 不作约束 —— 四份参照对 "items 是单份 schema 而另有
             // additionalItems" 全部判 VALID (ref49 两份日志最后一条 policy 格).
-            for (int i = 0; i < node.size(); i++) {
-                walk(items, node.get(i), path + "[" + i + "]", ctx, errors);
+            for (int i = 0; i < size(node); i++) {
+                walk(items, get(node, i), path + "[" + i + "]", ctx, errors);
             }
         }
     }
 
     /** 元组前 N 格各自过一份子 schema; 实例短于 N 就只比已有的那些. */
-    private void checkPositions(JsonNode positional, JsonNode node, String path, Ctx ctx,
+    private void checkPositions(Object positional, Object node, String path, Ctx ctx,
                                 List<String> errors) {
-        int n = Math.min(node.size(), positional.size());
+        int n = Math.min(size(node), size(positional));
         for (int i = 0; i < n; i++) {
-            walk(positional.get(i), node.get(i), path + "[" + i + "]", ctx, errors);
+            walk(get(positional, i), get(node, i), path + "[" + i + "]", ctx, errors);
         }
     }
 
     /** 元组尾巴: 第 from 个之后的元素过一遍 tail; `false` 就等于"不许有尾巴". */
-    private void checkTail(JsonNode tail, JsonNode node, String path, int from, Ctx ctx,
+    private void checkTail(Object tail, Object node, String path, int from, Ctx ctx,
                            List<String> errors, String keyword) {
-        if (tail == null || tail.isNull()) return;
-        if (!tail.isBoolean() && !tail.isObject()) {
+        if (tail == null || isNull(tail)) return;
+        if (!isBoolean(tail) && !isObject(tail)) {
             errors.add(path + ": " + keyword + " must be an object or a boolean but is "
                     + jsonType(tail) + " " + literal(tail) + ", refusing to treat it as no constraint");
             return;
         }
-        for (int i = from; i < node.size(); i++) {
-            walk(tail, node.get(i), path + "[" + i + "]", ctx, errors);
+        for (int i = from; i < size(node); i++) {
+            walk(tail, get(node, i), path + "[" + i + "]", ctx, errors);
         }
     }
 
-    private void checkString(JsonNode schema, JsonNode node, String path, List<String> errors) {
-        String s = node.asText();
+    private void checkString(Object schema, Object node, String path, List<String> errors) {
+        String s = asText(node);
         // 数的是**码点**, 不是 java.lang.String.length() 那个 UTF-16 码元数 (理由与四份参照的逐格
         // 同判见 codePointLength 的注释)。
         int len = codePointLength(s);
-        JsonNode minLen = schema.get("minLength");
-        if (minLen != null && minLen.isNumber() && len < minLen.asDouble()) {
+        Object minLen = get(schema, "minLength");
+        if (minLen != null && isNumber(minLen) && len < asDouble(minLen)) {
             errors.add(path + ": string shorter than minLength " + literal(minLen));
         }
-        JsonNode maxLen = schema.get("maxLength");
-        if (maxLen != null && maxLen.isNumber() && len > maxLen.asDouble()) {
+        Object maxLen = get(schema, "maxLength");
+        if (maxLen != null && isNumber(maxLen) && len > asDouble(maxLen)) {
             errors.add(path + ": string longer than maxLength " + literal(maxLen));
         }
-        JsonNode pattern = schema.get("pattern");
-        if (pattern != null && pattern.isTextual()) {
+        Object pattern = get(schema, "pattern");
+        if (pattern != null && isTextual(pattern)) {
             try {
-                if (!Pattern.compile(pattern.asText()).matcher(s).find()) {
-                    errors.add(path + ": does not match pattern " + pattern.asText());
+                if (!Pattern.compile(asText(pattern)).matcher(s).find()) {
+                    errors.add(path + ": does not match pattern " + asText(pattern));
                 }
             } catch (PatternSyntaxException e) {
                 errors.add(path + ": malformed pattern in schema: " + e.getMessage());
@@ -599,15 +660,15 @@ public class JsonSchemaValidator {
         }
     }
 
-    private void checkNumber(JsonNode schema, JsonNode node, String path, List<String> errors) {
-        double v = node.asDouble();
-        JsonNode min = schema.get("minimum");
-        if (min != null && min.isNumber() && v < min.asDouble()) {
-            errors.add(path + ": " + literal(node) + " < minimum " + min.asDouble());
+    private void checkNumber(Object schema, Object node, String path, List<String> errors) {
+        double v = asDouble(node);
+        Object min = get(schema, "minimum");
+        if (min != null && isNumber(min) && v < asDouble(min)) {
+            errors.add(path + ": " + literal(node) + " < minimum " + asDouble(min));
         }
-        JsonNode max = schema.get("maximum");
-        if (max != null && max.isNumber() && v > max.asDouble()) {
-            errors.add(path + ": " + literal(node) + " > maximum " + max.asDouble());
+        Object max = get(schema, "maximum");
+        if (max != null && isNumber(max) && v > asDouble(max)) {
+            errors.add(path + ": " + literal(node) + " > maximum " + asDouble(max));
         }
         // exclusiveMinimum / exclusiveMaximum 是同一族里**不含等号**的那一头: 旧版只做了上面两条,
         // 于是广告「必须 > 0」的参数, 0 照过. 真生产者就交这个形状 —— 官方 python SDK 1.27.1 +
@@ -619,13 +680,13 @@ public class JsonSchemaValidator {
         // 那 2 格我们站 jsonschema 一侧: 值不配当数值 ⇒ 这条不参与, 与上面 minimum/maximum 用的
         // `isNumber()` 同一条 house rule —— ajv 是在 compile 阶段直接把整份 schema 抛掉的,
         // 那是"拒绝这份 schema"而不是"这个实例违规", 与本方法的返回形状(实例级违规清单)不同类.
-        JsonNode exMin = schema.get("exclusiveMinimum");
-        if (exMin != null && exMin.isNumber() && v <= exMin.asDouble()) {
-            errors.add(path + ": " + literal(node) + " is not > exclusiveMinimum " + exMin.asDouble());
+        Object exMin = get(schema, "exclusiveMinimum");
+        if (exMin != null && isNumber(exMin) && v <= asDouble(exMin)) {
+            errors.add(path + ": " + literal(node) + " is not > exclusiveMinimum " + asDouble(exMin));
         }
-        JsonNode exMax = schema.get("exclusiveMaximum");
-        if (exMax != null && exMax.isNumber() && v >= exMax.asDouble()) {
-            errors.add(path + ": " + literal(node) + " is not < exclusiveMaximum " + exMax.asDouble());
+        Object exMax = get(schema, "exclusiveMaximum");
+        if (exMax != null && isNumber(exMax) && v >= asDouble(exMax)) {
+            errors.add(path + ": " + literal(node) + " is not < exclusiveMaximum " + asDouble(exMax));
         }
         // multipleOf 取"商的小数部分"而不是"余数", 因为参照两家都是这么判的: {multipleOf:1e-8} 遇 1,
         // 两份参照都说**过**, 而 `1.0 % 1e-8` 在 IEEE double 上是 9.99999997907744e-9 (非零) ⇒
@@ -633,18 +694,19 @@ public class JsonSchemaValidator {
         // `(0.3/0.1)%1` = 0.9999999999999996 正是非零 —— 所以这一格不是"参照容忍了浮点误差",
         // 而是它们真的在问"除得尽吗". 除数为 0 时商是 NaN, `NaN != 0` 成立 ⇒ 判违规, 与 ajv 同档
         // (jsonschema 那侧直接 RAISED ZeroDivisionError, 也归 RED 一档).
-        JsonNode step = schema.get("multipleOf");
-        if (step != null && step.isNumber()) {
-            double quotientRemainder = (v / step.asDouble()) % 1.0;
+        Object step = get(schema, "multipleOf");
+        if (step != null && isNumber(step)) {
+            double quotientRemainder = (v / asDouble(step)) % 1.0;
             if (quotientRemainder != 0.0) {
-                errors.add(path + ": " + literal(node) + " is not a multiple of " + step.asDouble());
+                errors.add(path + ": " + literal(node) + " is not a multiple of " + asDouble(step));
             }
         }
     }
 
-    private static boolean inEnum(JsonNode enumNode, JsonNode value) {
-        if (value == null) return false;
-        for (JsonNode candidate : enumNode) if (jsonEquals(candidate, value)) return true;
+    private static boolean inEnum(Object enumNode, Object value) {
+        // 这里原先有一句 `if (value == null) return false;`, 那是 Jackson 时代"null = 缺席"的残留:
+        // enum 里躺着 null 时, 值也是 null 的实例本该命中它, 那道闸却把它一律判红。
+        for (Object candidate : Wire.elements(enumNode)) if (jsonEquals(candidate, value)) return true;
         return false;
     }
 
@@ -652,7 +714,7 @@ public class JsonSchemaValidator {
      * JSON 意义上的相等, enum / const / uniqueItems 三处共用 (规范里 const 就是"单值 enum").
      *
      * <p>对象比键值集合因而与书写顺序无关、数组按次序比、字符串不比 Java 引用: 这些是同类型下的
-     * {@link JsonNode#equals} 给的. 跨数字类型与**嵌套**那两层它都不给, 所以自己走:
+     * {@link Object#equals} 给的. 跨数字类型与**嵌套**那两层它都不给, 所以自己走:
      * {@code IntNode(1).equals(DoubleNode(1.0))} 在顶层是 false (实测 jackson-databind
      * 2.13.5 / 2.15.4 / 2.18.9 三版一致, ref50_jackson_probe.log), {@code [[1],[1.0]]} 与
      * {@code [{"a":1},{"a":1.0}]} 在嵌套层也是 false (同三版, ref52_jackson_nested.log),
@@ -660,29 +722,30 @@ public class JsonSchemaValidator {
      * (ref50 两份日志的 "const int vs int-valued float"、ref52 两份日志的
      * "nested int vs float in array" / "numeric in object leaf").
      */
-    private static boolean jsonEquals(JsonNode a, JsonNode b) {
-        if (a == null || b == null) return false;
+    private static boolean jsonEquals(Object a, Object b) {
+        // 同上: null 是显式 JSON null, 不是缺席 —— 所以 {"const": null} 配 null 实例是**相等**的。
+        // 只剩一侧为 null 时才是不同值。
+        if (a == null || b == null) return a == null && b == null;
         if (a.equals(b)) return true;
-        if (a.isNumber() && b.isNumber()) return sameNumber(a, b);
+        if (isNumber(a) && isNumber(b)) return sameNumber(a, b);
         // Jackson 的 equals 是"逐节点按类型比"的, 嵌套一层就不再认数值相等 —— 实测
         // (~/.cache/zmcp_prey/ref52_jackson_nested.log, databind 2.13.5 / 2.15.4 / 2.18.9 三版一致)
         // [[1],[1.0]] 与 [{"a":1},{"a":1.0}] 都是 equals=false, 而四份参照校验器都判这两格"重复"
         // (ref52 两份日志的 "nested int vs float in array" / "numeric in object leaf").
         // 所以这里自己走下去.
-        if (a.isArray() && b.isArray()) {
-            if (a.size() != b.size()) return false;
-            for (int i = 0; i < a.size(); i++) {
-                if (!jsonEquals(a.get(i), b.get(i))) return false;
+        if (isArray(a) && isArray(b)) {
+            if (size(a) != size(b)) return false;
+            for (int i = 0; i < size(a); i++) {
+                if (!jsonEquals(get(a, i), get(b, i))) return false;
             }
             return true;
         }
-        if (a.isObject() && b.isObject()) {
-            if (a.size() != b.size()) return false;
-            for (Iterator<String> it = a.fieldNames(); it.hasNext();) {
-                String field = it.next();
+        if (isObject(a) && isObject(b)) {
+            if (size(a) != size(b)) return false;
+            for (String field : Wire.fieldNames(a)) {
                 // b 少这个字段时 get 返回 null, jsonEquals(.., null) 在上面那行就是 false.
                 // 键序不参与 (Jackson 的 equals 本来也不看序, 实测 "key order swapped" 那格是 true).
-                if (!jsonEquals(a.get(field), b.get(field))) return false;
+                if (!jsonEquals(get(a, field), get(b, field))) return false;
             }
             return true;
         }
@@ -693,11 +756,11 @@ public class JsonSchemaValidator {
      *  三版 databind 同读数, ref52_bignum_java.log), 而 {"tags": [1e1000, 5]} 这样的请求体真能到这儿
      *  —— 那一条退回按 double 比, 两家参照在 IEEE double 上与我们同一条路 (四份都把这两个饱和成 inf
      *  并判重复, 见两份 oracle 日志的 `uniqueItems both overflow to infinity` 四行). */
-    private static boolean sameNumber(JsonNode a, JsonNode b) {
+    private static boolean sameNumber(Object a, Object b) {
         try {
-            return a.decimalValue().compareTo(b.decimalValue()) == 0;
+            return decimalValue(a).compareTo(decimalValue(b)) == 0;
         } catch (NumberFormatException e) {
-            return a.asDouble() == b.asDouble();
+            return asDouble(a) == asDouble(b);
         }
     }
 
@@ -711,46 +774,41 @@ public class JsonSchemaValidator {
      * 报 0 and 1, 三对那格报 4 and 5; jsonschema 干脆不给下标), 所以这里取"第一对"是一个选择,
      * 依据只有那条: 逐对铺开会比参照多红, 而参照的判定数才是被钉住的那一半。
      */
-    private static int[] firstDuplicate(JsonNode array) {
-        for (int i = 0; i < array.size(); i++) {
-            for (int j = i + 1; j < array.size(); j++) {
-                if (jsonEquals(array.get(i), array.get(j))) return new int[] {i, j};
+    private static int[] firstDuplicate(Object array) {
+        for (int i = 0; i < size(array); i++) {
+            for (int j = i + 1; j < size(array); j++) {
+                if (jsonEquals(get(array, i), get(array, j))) return new int[] {i, j};
             }
         }
         return null;
     }
 
-    private static boolean matchesType(String expected, JsonNode node) {
-        if (node == null) return false;
-        if ("null".equals(expected)) return node.isNull();
+    private static boolean matchesType(String expected, Object node) {
+        // node == null 在这里是**显式 JSON null**, 不是"这一格没有实例": 走到 walk 的实例节点
+        // 都是真的存在的(对象的每一格由 hasKey 把门, 数组的下标必然有值), 而 Jackson 那侧缺席
+        // 的格子压根不会带着一个 NullNode 进来。留着原来那条 "node == null 即不匹配" 的话,
+        // {"anyOf":[{"type":"string"},{"type":"null"}]} 配 null 实例就会被判红 —— 而
+        // {"type":"null"} 恰恰是"这个值就是 null"这条约束的正常写法。
+        if ("null".equals(expected)) return isNull(node);
         switch (expected) {
-            case "object": return node.isObject();
-            case "array": return node.isArray();
-            case "string": return node.isTextual();
-            case "boolean": return node.isBoolean();
-            case "number": return node.isNumber();
+            case "object": return isObject(node);
+            case "array": return isArray(node);
+            case "string": return isTextual(node);
+            case "boolean": return isBoolean(node);
+            case "number": return isNumber(node);
             case "integer":
-                return node.isIntegralNumber()
-                        || (node.isNumber() && node.asDouble() == Math.floor(node.asDouble()));
+                return isIntegral(node)
+                        || (isNumber(node) && asDouble(node) == Math.floor(asDouble(node)));
             default: return true; // 未知 type 值不构成约束
         }
     }
 
-    private static String jsonType(JsonNode node) {
-        if (node == null) return "missing";
-        if (node.isNull()) return "null";
-        if (node.isObject()) return "object";
-        if (node.isArray()) return "array";
-        if (node.isTextual()) return "string";
-        if (node.isBoolean()) return "boolean";
-        if (node.isIntegralNumber()) return "integer";
-        if (node.isNumber()) return "number";
-        return "unknown";
+    private static String jsonType(Object node) {
+        return Wire.jsonType(node);
     }
 
-    private static String literal(JsonNode node) {
-        if (node == null) return "null";
-        return node.isTextual() ? "'" + node.asText() + "'" : node.toString();
+    private static String literal(Object node) {
+        return Wire.literal(node);
     }
 
     /** minLength / maxLength 的"长度" = RFC 8259 意义上的字符数, 一个字符 = 一个 Unicode 码点.

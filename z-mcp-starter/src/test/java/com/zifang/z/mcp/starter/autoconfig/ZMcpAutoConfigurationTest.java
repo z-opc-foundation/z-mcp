@@ -140,7 +140,7 @@ public class ZMcpAutoConfigurationTest {
     @Test
     public void the_user_can_replace_the_manager_with_their_own() {
         final ExternalServerManager mine = new ExternalServerManager(new McpRegistry(),
-                new McpProperties(), new com.fasterxml.jackson.databind.ObjectMapper());
+                new McpProperties());
         runner.withPropertyValues("z.mcp.enabled=true")
                 .withBean(ExternalServerManager.class, () -> mine)
                 .run(ctx -> {

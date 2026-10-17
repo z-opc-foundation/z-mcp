@@ -302,7 +302,6 @@ public class HubAggregationTest {
         cfg.setCommand("/bin/true");
         props.getServers().add(cfg);
         ExternalServerManager manager = new ExternalServerManager(registry, props,
-                new com.fasterxml.jackson.databind.ObjectMapper(),
                 new ExternalServerManager.ExchangeFactory() {
                     @Override public JsonRpcExchange create(McpProperties.ServerConfig config) {
                         GhostExchange e = new GhostExchange();

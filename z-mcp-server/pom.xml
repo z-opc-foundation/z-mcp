@@ -65,6 +65,15 @@
                 </exclusion>
             </exclusions>
         </dependency>
+
+        <!-- 测试期读 HTTP 响应体用的 Jackson 读回器, 与 z-mcp-core 那条同一理由:
+             主源码已零 Jackson, 而断言要由一个与生产序列化器不同的解析器来判。
+             迁到 Wire 会让"线上字节没变"这件事失去独立读数, 所以不进 compile。 -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

@@ -60,7 +60,7 @@ public class StdioJsonRpcExchangeTest {
     }
 
     private static StdioJsonRpcExchange open(long timeoutMillis) throws IOException {
-        return new StdioJsonRpcExchange(fixtureCommand(), MAPPER, timeoutMillis);
+        return new StdioJsonRpcExchange(fixtureCommand(), timeoutMillis);
     }
 
     // ------------------------------------------------------------------ 往返
@@ -226,7 +226,7 @@ public class StdioJsonRpcExchangeTest {
             McpProperties.ServerConfig cfg = new McpProperties.ServerConfig();
             cfg.setName("stdio-fixture");
             McpRemoteClient client = new McpRemoteClient("stdio-fixture", cfg, exchange,
-                    MAPPER, "z-mcp", "0.2.0");
+                    "z-mcp", "0.2.0");
             client.connect();
 
             JsonNode seen = MAPPER.readTree(
@@ -453,7 +453,7 @@ public class StdioJsonRpcExchangeTest {
     @Test
     public void an_empty_command_is_rejected_before_anything_is_spawned() {
         try {
-            new StdioJsonRpcExchange(new ArrayList<String>(), MAPPER, 1000L);
+            new StdioJsonRpcExchange(new ArrayList<String>(), 1000L);
             fail();
         } catch (IllegalArgumentException expected) {
             assertTrue(expected.getMessage(), expected.getMessage().contains("command"));
@@ -461,7 +461,7 @@ public class StdioJsonRpcExchangeTest {
             fail("参数校验应在拉起进程之前: " + e);
         }
         try {
-            new StdioJsonRpcExchange(Arrays.asList("  "), MAPPER, 1000L);
+            new StdioJsonRpcExchange(Arrays.asList("  "), 1000L);
             fail();
         } catch (IllegalArgumentException expected) {
             assertNotNull(expected.getMessage());
@@ -483,7 +483,7 @@ public class StdioJsonRpcExchangeTest {
         config.setArgs(new ArrayList<String>(command.subList(1, command.size())));
         config.setReadTimeoutMillis(15_000);
         properties.getServers().add(config);
-        return new ExternalServerManager(registry, properties, MAPPER);
+        return new ExternalServerManager(registry, properties);
     }
 
     /** 端到端: 一行 z.mcp.servers[] 配置 ⇒ 真子进程的工具出现在本地目录里, 并且调得动. */

@@ -1,12 +1,11 @@
 package com.zifang.z.mcp.core.client;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zifang.z.mcp.api.dto.CallToolResult;
 import com.zifang.z.mcp.api.dto.ContentBlock;
 import com.zifang.z.mcp.api.dto.McpToolDto;
 import com.zifang.z.mcp.api.dto.ToolAnnotations;
 import com.zifang.z.mcp.core.properties.McpProperties;
+import com.zifang.z.mcp.core.json.Wire;
 import com.zifang.z.mcp.core.protocol.McpSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -44,24 +43,22 @@ public class McpRemoteClient {
     private final String serverName;
     private final JsonRpcExchange exchange;
     private final McpProperties.ServerConfig config;
-    private final ObjectMapper mapper;
     private final String clientName;
     private final String clientVersion;
     private final AtomicLong ids = new AtomicLong(1);
 
     private volatile String sessionId;
     private volatile String protocolVersion;
-    private volatile JsonNode serverInfo;
-    private volatile JsonNode capabilities;
+    private volatile Object serverInfo;
+    private volatile Object capabilities;
     private volatile boolean connected;
 
     public McpRemoteClient(String serverName, McpProperties.ServerConfig config,
-                                   JsonRpcExchange exchange, ObjectMapper mapper,
+                                   JsonRpcExchange exchange,
                                    String clientName, String clientVersion) {
         this.serverName = serverName;
         this.config = config;
         this.exchange = exchange;
-        this.mapper = mapper;
         this.clientName = clientName;
         this.clientVersion = clientVersion;
     }
@@ -83,9 +80,9 @@ public class McpRemoteClient {
         clientInfo.put("version", clientVersion);
         params.put("clientInfo", clientInfo);
 
-        JsonNode init = rpc(McpSchema.M_INITIALIZE, params, true);
-        serverInfo = init.get("serverInfo");
-        capabilities = init.get("capabilities");
+        Object init = rpc(McpSchema.M_INITIALIZE, params, true);
+        serverInfo = Wire.get(init, "serverInfo");
+        capabilities = Wire.get(init, "capabilities");
         protocolVersion = text(init, "protocolVersion", McpSchema.DEFAULT_ASSUMED);
         connected = true;
         notify(McpSchema.M_NOTIFICATION_INITIALIZED, null);
@@ -123,9 +120,9 @@ public class McpRemoteClient {
 
     public String protocolVersion() { return protocolVersion; }
 
-    public JsonNode serverInfo() { return serverInfo; }
+    public Object serverInfo() { return serverInfo; }
 
-    public JsonNode capabilities() { return capabilities; }
+    public Object capabilities() { return capabilities; }
 
     public String sessionId() { return sessionId; }
 
@@ -143,10 +140,10 @@ public class McpRemoteClient {
         for (int page = 0; page < MAX_PAGES; page++) {
             Map<String, Object> params = new LinkedHashMap<String, Object>();
             if (cursor != null) params.put("cursor", cursor);
-            JsonNode result = rpc(McpSchema.M_TOOLS_LIST, params.isEmpty() ? null : params, true);
-            JsonNode tools = result.get("tools");
-            if (tools != null && tools.isArray()) {
-                for (JsonNode t : tools) out.add(toToolDto(t));
+            Object result = rpc(McpSchema.M_TOOLS_LIST, params.isEmpty() ? null : params, true);
+            Object tools = Wire.get(result, "tools");
+            if (Wire.isArray(tools)) {
+                for (Object t : Wire.elements(tools)) out.add(toToolDto(t));
             }
             cursor = text(result, "nextCursor", null);
             if (cursor == null || cursor.isEmpty()) return out;
@@ -166,13 +163,13 @@ public class McpRemoteClient {
         return fromWire(rpc(McpSchema.M_TOOLS_CALL, params, true));
     }
 
-    public JsonNode ping() throws IOException {
+    public Object ping() throws IOException {
         return rpc(McpSchema.M_PING, null, true);
     }
 
     // ------------------------------------------------------------------ JSON-RPC
 
-    private JsonNode rpc(String method, Map<String, Object> params, boolean allowRetry)
+    private Object rpc(String method, Map<String, Object> params, boolean allowRetry)
             throws IOException {
         Map<String, Object> request = new LinkedHashMap<String, Object>();
         request.put("jsonrpc", "2.0");
@@ -180,7 +177,7 @@ public class McpRemoteClient {
         request.put("method", method);
         if (params != null) request.put("params", params);
 
-        JsonRpcExchange.Response res = exchange.post(mapper.writeValueAsString(request), headers());
+        JsonRpcExchange.Response res = exchange.post(Wire.write(request), headers());
         if (res.status() == 404 && allowRetry && sessionId != null) {
             log.info("mcp server {} session expired, re-initializing", serverName);
             sessionId = null;
@@ -198,23 +195,23 @@ public class McpRemoteClient {
             throw new RemoteRejectException(res.status(), null,
                     "server " + serverName + " answered HTTP " + res.status() + " to " + method);
         }
-        JsonNode envelope = parseEnvelope(res);
+        Object envelope = parseEnvelope(res);
         adoptSession(res);
         if (envelope == null) {
             throw new IOException("mcp server " + serverName + " sent no JSON-RPC envelope for "
                     + method + " (HTTP " + res.status() + ")");
         }
-        JsonNode error = envelope.get("error");
-        if (error != null && !error.isNull()) {
-            JsonNode code = error.get("code");
+        Object error = Wire.get(envelope, "error");
+        if (error != null) {
+            Object code = Wire.get(error, "code");
+            Object message = Wire.get(error, "message");
             throw new RemoteRejectException(0,
-                    code == null || !code.isNumber() ? null : Integer.valueOf(code.asInt()),
+                    code == null || !Wire.isNumber(code) ? null : Integer.valueOf(((Number) code).intValue()),
                     method + " on " + serverName + ": "
-                            + (error.get("message") == null ? error.toString()
-                                    : error.get("message").asText()));
+                            + (message == null ? Wire.write(error) : Wire.asText(message)));
         }
-        JsonNode result = envelope.get("result");
-        return result == null || result.isNull() ? mapper.createObjectNode() : result;
+        Object result = Wire.get(envelope, "result");
+        return result == null ? Wire.object() : result;
     }
 
     private void notify(String method, Map<String, Object> params) throws IOException {
@@ -222,7 +219,7 @@ public class McpRemoteClient {
         request.put("jsonrpc", "2.0");
         request.put("method", method);
         if (params != null) request.put("params", params);
-        JsonRpcExchange.Response res = exchange.post(mapper.writeValueAsString(request), headers());
+        JsonRpcExchange.Response res = exchange.post(Wire.write(request), headers());
         // 202 是规范值, 但部分实现回 200 空体; 只有 4xx/5xx 才算失败
         if (res.status() >= 400) {
             connected = false;
@@ -294,22 +291,22 @@ public class McpRemoteClient {
      *
      * <p>202/空体返回 null, 由调用方判断是否可接受.
      */
-    private JsonNode parseEnvelope(JsonRpcExchange.Response res) throws IOException {
+    private Object parseEnvelope(JsonRpcExchange.Response res) throws IOException {
         String body = res.body() == null ? "" : res.body().trim();
         if (body.isEmpty()) return null;
         String contentType = res.contentType();
         if (contentType != null && contentType.toLowerCase().contains("text/event-stream")) {
-            for (JsonNode candidate : ssePayloads(body, mapper)) {
-                if (candidate.has("result") || candidate.has("error")) return candidate;
+            for (Object candidate : ssePayloads(body)) {
+                if (Wire.has(candidate, "result") || Wire.has(candidate, "error")) return candidate;
             }
             return null;
         }
-        return mapper.readTree(body);
+        return Wire.read(body);
     }
 
     /** 把 SSE 文本里的 {@code data:} 字段还原成 JSON 节点(多行 data 按规范拼接, 注释帧忽略). */
-    static List<JsonNode> ssePayloads(String text, ObjectMapper mapper) {
-        List<JsonNode> out = new ArrayList<JsonNode>();
+    static List<Object> ssePayloads(String text) {
+        List<Object> out = new ArrayList<Object>();
         StringBuilder data = new StringBuilder();
         for (String line : text.split("\r?\n")) {
             if (line.startsWith(":")) continue;
@@ -320,33 +317,30 @@ public class McpRemoteClient {
                 continue;
             }
             if (line.trim().isEmpty() && data.length() > 0) {
-                appendJson(out, data.toString(), mapper);
+                appendJson(out, data.toString());
                 data.setLength(0);
             }
         }
-        if (data.length() > 0) appendJson(out, data.toString(), mapper);
+        if (data.length() > 0) appendJson(out, data.toString());
         return out;
     }
 
-    private static void appendJson(List<JsonNode> out, String raw, ObjectMapper mapper) {
-        try {
-            JsonNode node = mapper.readTree(raw);
-            if (node != null && node.isObject()) out.add(node);
-        } catch (Exception ignore) {
-            // 非 JSON 的 data 帧(进度文本等)不参与请求/响应配对
-        }
+    private static void appendJson(List<Object> out, String raw) {
+        Object node = Wire.read(raw);
+        // 非 JSON 的 data 帧(进度文本等)不参与请求/响应配对
+        if (Wire.isObject(node)) out.add(node);
     }
 
     // ------------------------------------------------------------------ 映射
 
-    private McpToolDto toToolDto(JsonNode t) {
-        JsonNode inputSchema = t.get("inputSchema");
-        JsonNode outputSchema = t.get("outputSchema");
+    private McpToolDto toToolDto(Object t) {
+        Object inputSchema = Wire.get(t, "inputSchema");
+        Object outputSchema = Wire.get(t, "outputSchema");
         return new McpToolDto(text(t, "name", null), text(t, "title", null), text(t, "description", null),
                 serverName,
-                inputSchema == null || inputSchema.isNull() ? null : inputSchema.toString(),
-                outputSchema == null || outputSchema.isNull() ? null : outputSchema.toString(),
-                annotations(t.get("annotations")),
+                inputSchema == null ? null : Wire.write(inputSchema),
+                outputSchema == null ? null : Wire.write(outputSchema),
+                annotations(Wire.get(t, "annotations")),
                 origins(t));
     }
 
@@ -354,75 +348,55 @@ public class McpRemoteClient {
      * 上游 {@code _meta["z-mcp/origins"]} 里的来源链(逗号分隔). 没有该键 —— 例如对方不是 z-mcp,
      * 或它是本机自己的内置工具 —— 返回 null, 由广告侧从空链起算.
      */
-    private static List<String> origins(JsonNode t) {
-        JsonNode meta = t.get("_meta");
-        if (meta == null || !meta.isObject()) return null;
-        JsonNode node = meta.get("z-mcp/origins");
-        if (node == null || node.isNull()) return null;
+    private static List<String> origins(Object t) {
+        Object meta = Wire.get(t, "_meta");
+        if (!Wire.isObject(meta)) return null;
+        Object node = Wire.get(meta, "z-mcp/origins");
+        if (node == null) return null;
         List<String> out = new ArrayList<String>();
-        for (String hop : node.asText("").split(",")) {
+        for (String hop : String.valueOf(Wire.asText(node)).split(",")) {
             String trimmed = hop.trim();
             if (!trimmed.isEmpty()) out.add(trimmed);
         }
         return out;
     }
 
-    static ToolAnnotations annotations(JsonNode node) {
-        if (node == null || !node.isObject()) return null;
+    static ToolAnnotations annotations(Object node) {
+        if (!Wire.isObject(node)) return null;
         return new ToolAnnotations(text(node, "title", null),
                 hint(node, "readOnlyHint"), hint(node, "destructiveHint"),
                 hint(node, "idempotentHint"), hint(node, "openWorldHint"));
     }
 
-    private static Boolean hint(JsonNode node, String field) {
-        JsonNode v = node.get(field);
-        return v == null || v.isNull() ? null : Boolean.valueOf(v.asBoolean());
+    private static Boolean hint(Object node, String field) {
+        Object v = Wire.get(node, field);
+        return v instanceof Boolean ? (Boolean) v : null;
     }
 
     /** 上游 CallToolResult → 本地 CallToolResult(内容块按线格式原样转发). */
-    static CallToolResult fromWire(JsonNode result) {
+    static CallToolResult fromWire(Object result) {
         List<ContentBlock> blocks = new ArrayList<ContentBlock>();
-        JsonNode content = result.get("content");
-        if (content != null && content.isArray()) {
-            for (JsonNode c : content) {
-                ContentBlock block = ContentBlock.fromWire(asMap(c));
+        Object content = Wire.get(result, "content");
+        if (Wire.isArray(content)) {
+            for (Object c : Wire.elements(content)) {
+                ContentBlock block = ContentBlock.fromWire(Wire.toMap(c));
                 if (block != null) blocks.add(block);
             }
         }
         CallToolResult out = CallToolResult.of(blocks);
-        JsonNode isError = result.get("isError");
-        if (isError != null && isError.asBoolean()) out.setError(true);
-        JsonNode structured = result.get("structuredContent");
-        if (structured != null && !structured.isNull()) out.setStructuredContent(toPlain(structured));
-        JsonNode meta = result.get("_meta");
-        if (meta != null && meta.isObject()) {
+        if (Boolean.TRUE.equals(Wire.get(result, "isError"))) out.setError(true);
+        Object structured = Wire.get(result, "structuredContent");
+        if (structured != null) out.setStructuredContent(Wire.toPlain(structured));
+        Object meta = Wire.get(result, "_meta");
+        if (Wire.isObject(meta)) {
             Map<String, Object> m = new LinkedHashMap<String, Object>();
-            for (Iterator<String> it = meta.fieldNames(); it.hasNext(); ) {
-                String k = it.next();
-                m.put(k, toPlain(meta.get(k)));
+            for (String k : Wire.fieldNames(meta)) {
+                m.put(k, Wire.toPlain(Wire.get(meta, k)));
             }
             out.meta(m);
         }
         return out;
     }
-
-    @SuppressWarnings("unchecked")
-    private static Object toPlain(JsonNode node) {
-        try {
-            return WIRE_MAPPER.convertValue(node, Object.class);
-        } catch (IllegalArgumentException e) {
-            return node.toString();
-        }
-    }
-
-    /** 保序转 Map — 内容块字段顺序要能原样出去. */
-    @SuppressWarnings("unchecked")
-    private static Map<String, Object> asMap(JsonNode node) {
-        if (node == null || !node.isObject()) return null;
-        return WIRE_MAPPER.convertValue(node, LinkedHashMap.class);
-    }
-
-    private static final ObjectMapper WIRE_MAPPER = new ObjectMapper();
 
     /**
      * 握手时广告出去的客户端能力 —— 只列这一侧真兑现得了的.
@@ -440,9 +414,9 @@ public class McpRemoteClient {
         return new LinkedHashMap<String, Object>();
     }
 
-    private static String text(JsonNode node, String field, String fallback) {
-        JsonNode v = node == null ? null : node.get(field);
-        return v == null || v.isNull() ? fallback : v.asText();
+    private static String text(Object node, String field, String fallback) {
+        Object v = Wire.get(node, field);
+        return v == null ? fallback : Wire.asText(v);
     }
 
     /** 上游拒绝(HTTP 4xx/5xx)或返回 JSON-RPC error. */

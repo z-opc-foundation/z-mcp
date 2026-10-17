@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 端到端 (不走 Spring 容器)：手工注入 ObjectProvider 然后调 bind(),
+ * 端到端 (不走 Spring 容器)：手工注入 ObjectProvider 然后调 afterPropertiesSet(),
  * 走完反射路径,断言 ToolRegistry 真的拿到了 McpRegistry.
  *
  * 为什么不用 @SpringBootTest: Spring Boot 2.7 的 @ConditionalOnClass(name=...) 在测试
@@ -34,7 +34,7 @@ class McpToolRegistryBindConfigEndToEndTest {
         // 2. 准备一个可被反射调通的 McpRegistry stub,记录 listener 数
         TestMcpRegistry reg = new TestMcpRegistry();
 
-        // 3. 准备 ObjectProvider stub (只覆盖 bind() 会调的方法)
+        // 3. 准备 ObjectProvider stub (只覆盖 afterPropertiesSet() 会调的方法)
         ObjectProvider<McpRegistry> op = new FixedObjectProvider<>(reg);
 
         // 4. 手工 new McpToolRegistryBindConfig + 注入 ObjectProvider
@@ -43,14 +43,14 @@ class McpToolRegistryBindConfigEndToEndTest {
         f.setAccessible(true);
         f.set(cfg, op);
 
-        // 5. 调 bind(): 反射路径 (ToolRegistry.class 在 classpath ⇒ 走真路径)
-        cfg.bind();
+        // 5. 调 afterPropertiesSet(): 反射路径 (ToolRegistry.class 在 classpath ⇒ 走真路径)
+        cfg.afterPropertiesSet();
 
         // 6. 验证 McpRegistry 收到了 listener (即反射 addChangeListener 调通了)
         assertTrue(reg.listeners.size() >= 1,
-            "bind() 应给 McpRegistry 加至少 1 个 listener (TOOLS), 实测 " + reg.listeners.size());
+            "afterPropertiesSet() 应给 McpRegistry 加至少 1 个 listener (TOOLS), 实测 " + reg.listeners.size());
         assertEquals(42, reg.lastToolCountReturned,
-            "bind() 调过 toolCount() 记的数 (间接证明反射 bindMcpRegistry 不抛)");
+            "afterPropertiesSet() 调过 toolCount() 记的数 (间接证明反射 bindMcpRegistry 不抛)");
 
         // 7. 额外验证: 反射 getInstance 与直接 import 的 ToolRegistry.getInstance() 是同一对象
         Object reflected = trClass.getMethod("getInstance").invoke(null);
@@ -79,7 +79,7 @@ class McpToolRegistryBindConfigEndToEndTest {
 
         @Override
         public int toolCount() {
-            // 记录最近一次调用,让测试断言 "bind() 真的调过 toolCount()"
+            // 记录最近一次调用,让测试断言 "afterPropertiesSet() 真的调过 toolCount()"
             lastToolCountReturned = 42;
             return 42;
         }

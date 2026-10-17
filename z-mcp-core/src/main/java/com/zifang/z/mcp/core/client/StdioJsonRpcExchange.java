@@ -1,9 +1,7 @@
 package com.zifang.z.mcp.core.client;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.zifang.z.mcp.api.exception.McpException;
+import com.zifang.z.mcp.core.json.Wire;
 import com.zifang.z.mcp.core.protocol.McpSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,7 +41,6 @@ public final class StdioJsonRpcExchange
     private static final Logger log = LoggerFactory.getLogger(StdioJsonRpcExchange.class);
     private static final Charset UTF8 = Charset.forName("UTF-8");
 
-    private final ObjectMapper mapper;
     private final long requestTimeoutMillis;
     private final Process process;
     private final BufferedWriter stdin;
@@ -53,13 +50,12 @@ public final class StdioJsonRpcExchange
     /** 注册动作发生在读侧线程已经跑起来之后, 所以这个字段必须 volatile. */
     private volatile JsonRpcExchange.NotificationListener notificationListener;
 
-    public StdioJsonRpcExchange(List<String> command, ObjectMapper mapper, long requestTimeoutMillis)
+    public StdioJsonRpcExchange(List<String> command, long requestTimeoutMillis)
             throws IOException {
         if (command == null || command.isEmpty()
                 || command.get(0) == null || command.get(0).trim().isEmpty()) {
             throw new IllegalArgumentException("stdio command required (z.mcp.servers[].command)");
         }
-        this.mapper = mapper;
         this.requestTimeoutMillis = requestTimeoutMillis <= 0 ? 60_000L : requestTimeoutMillis;
         ProcessBuilder builder = new ProcessBuilder(command);
         builder.redirectErrorStream(false);
@@ -160,14 +156,9 @@ public final class StdioJsonRpcExchange
 
     /** 子进程没 id 就没法配对, 所以只能拒绝而不是猜. */
     private Long idOf(String body) {
-        try {
-            JsonNode node = mapper.readTree(body);
-            JsonNode id = node.get("id");
-            if (id == null || id.isNull() || !id.canConvertToLong()) return null;
-            return Long.valueOf(id.asLong());
-        } catch (IOException e) {
-            return null;
-        }
+        Object id = Wire.get(Wire.read(body), "id");
+        if (id == null || !Wire.isIntegral(id)) return null;
+        return Long.valueOf(((Number) id).longValue());
     }
 
     private void pumpStdout() {
@@ -207,27 +198,25 @@ public final class StdioJsonRpcExchange
     private void dispatch(String raw) {
         String trimmed = raw.trim();
         if (trimmed.isEmpty()) return;
-        JsonNode node;
-        try {
-            node = mapper.readTree(trimmed);
-        } catch (IOException e) {
+        Object node = Wire.read(trimmed);
+        if (node == null) {
             log.debug("discarding non-JSON line from stdio server: {}", trimmed);
             return;
         }
         // 先按"有没有 method"分流, 而不是先按"有没有在等的 id" —— 后者会把上游推来的**请求**
         // 一并归进"没人认领的响应"那一格, 于是这一条链路永远回不了话(见 answerIfRequest).
-        JsonNode method = node.get("method");
-        if (method != null && !method.isNull()) {
-            JsonNode id = node.get("id");
-            if (id == null || id.isNull()) deliverNotification(method.asText());
-            else answerIfRequest(node, method.asText());
+        Object method = Wire.get(node, "method");
+        if (method != null) {
+            Object id = Wire.get(node, "id");
+            if (id == null) deliverNotification(Wire.asText(method));
+            else answerIfRequest(node, Wire.asText(method));
             return;
         }
         // 到这里已经没有通知了(有 method 的都在上面那支交出去了), 剩下的只有响应帧:
         // 配不上等待槽的那一种就是"没人认领的响应".
-        JsonNode id = node.get("id");
-        if (id == null || !id.canConvertToLong()) return;
-        Awaiter awaiter = pending.remove(id.asLong());
+        Object id = Wire.get(node, "id");
+        if (id == null || !Wire.isIntegral(id)) return;
+        Awaiter awaiter = pending.remove(Long.valueOf(((Number) id).longValue()));
         if (awaiter == null) {
             log.debug("stdio server sent an unsolicited response id={}", id);
             return;
@@ -272,26 +261,27 @@ public final class StdioJsonRpcExchange
      *       到这里的一定是有 id 的请求.</li>
      * </ul>
      *
-     * <p>id 原样回显(数字或字符串都可能), 整个回执用 ObjectNode 组而不是拼字符串 ——
+     * <p>id 原样回显(数字或字符串都可能), 整个回执用节点组装而不是拼字符串 ——
      * 方法名来自对端, 拼进 JSON 就是让人往管道里塞引号的机会.
      */
-    private void answerIfRequest(JsonNode frame, String method) {
-        JsonNode id = frame.get("id");
-        ObjectNode reply = mapper.createObjectNode();
+    private void answerIfRequest(Object frame, String method) {
+        Object id = Wire.get(frame, "id");
+        com.zifang.util.json.model.JsonObject reply = Wire.object();
         reply.put("jsonrpc", "2.0");
-        reply.set("id", id);
+        reply.put("id", id);
         if (McpSchema.M_PING.equals(method)) {
-            reply.putObject("result");
+            reply.put("result", Wire.object());
             log.debug("answered stdio server's ping (id={})", id);
         } else {
-            ObjectNode error = reply.putObject("error");
+            com.zifang.util.json.model.JsonObject error = Wire.object();
             error.put("code", Integer.valueOf(McpException.METHOD_NOT_FOUND));
             error.put("message", "Method not found: the z-mcp client side does not implement " + method);
+            reply.put("error", error);
             log.info("stdio server asked for {} which this client does not implement; answered {}",
                     method, "JSON-RPC " + McpException.METHOD_NOT_FOUND);
         }
         try {
-            writeln(mapper.writeValueAsString(reply));
+            writeln(Wire.write(reply));
         } catch (IOException e) {
             closed = true;
             log.debug("cannot answer stdio server's request {}: {}", method, e.getMessage());

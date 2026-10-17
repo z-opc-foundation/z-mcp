@@ -1,6 +1,5 @@
 package com.zifang.z.mcp.admin.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zifang.z.mcp.api.dto.CallToolResult;
 import com.zifang.z.mcp.core.client.ExternalServerManager;
 import com.zifang.z.mcp.core.properties.McpProperties;
@@ -47,7 +46,7 @@ public class AdminQueryServiceTest {
         config.setReadTimeoutMillis(300);
         properties.getServers().add(config);
         ExternalServerManager manager =
-                new ExternalServerManager(registry, properties, new ObjectMapper());
+                new ExternalServerManager(registry, properties);
         manager.syncAll();
         return manager;
     }

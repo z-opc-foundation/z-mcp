@@ -1,10 +1,10 @@
 package com.zifang.z.mcp.starter.bridge;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zifang.util.core.meta.Result;
 import com.zifang.z.mcp.api.dto.CallToolResult;
 import com.zifang.z.mcp.api.dto.McpToolDto;
 import com.zifang.z.mcp.core.client.ExternalServerManager;
+import com.zifang.z.mcp.core.json.Wire;
 import com.zifang.z.mcp.core.properties.McpProperties;
 import com.zifang.z.mcp.core.registry.McpRegistry;
 import org.springframework.beans.factory.ObjectProvider;
@@ -34,8 +34,6 @@ import java.util.Map;
  */
 @RestController
 public class McpAliasController {
-
-    private static final ObjectMapper MCP_ALIAS_MAPPER = new ObjectMapper();
 
     @Autowired
     private ObjectProvider<ExternalServerManager> externalServerManagerProvider;
@@ -160,14 +158,9 @@ public class McpAliasController {
     }
 
     /** schema 来自外部 server 的 tools/list，单个坏 schema 不能顶掉整张工具表，降级为 null。 */
-    @SuppressWarnings("unchecked")
     private static Map<String, Object> readSchema(String schemaJson) {
         if (schemaJson == null || schemaJson.isEmpty()) return null;
-        try {
-            return MCP_ALIAS_MAPPER.readValue(schemaJson, Map.class);
-        } catch (Exception e) {
-            return null;
-        }
+        return Wire.toMap(Wire.read(schemaJson));
     }
 
     private static String toJson(Object value) {
@@ -175,10 +168,6 @@ public class McpAliasController {
         if (value instanceof String) {
             return (String) value;
         }
-        try {
-            return MCP_ALIAS_MAPPER.writeValueAsString(value);
-        } catch (Exception e) {
-            return String.valueOf(value);
-        }
+        return Wire.write(value);
     }
 }

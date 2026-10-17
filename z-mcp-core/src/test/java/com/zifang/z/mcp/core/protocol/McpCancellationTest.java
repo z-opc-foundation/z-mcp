@@ -1,5 +1,6 @@
 package com.zifang.z.mcp.core.protocol;
 
+import com.zifang.z.mcp.core.json.Wire;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zifang.z.mcp.api.exception.McpException;
@@ -53,7 +54,7 @@ public class McpCancellationTest {
         properties.setServerVersion("9.9.9-test");
         registry = new McpRegistry();
         sessions = new McpSessionStore(properties);
-        handler = new McpProtocolHandler(registry, properties, mapper);
+        handler = new McpProtocolHandler(registry, properties);
     }
 
     // ------------------------------------------------------------------ 用例
@@ -343,7 +344,7 @@ public class McpCancellationTest {
         volatile Throwable error;
 
         Running(final String tool, final McpProtocolHandler.RequestContext ctx, final String idJson) {
-            final JsonNode request = call("tools/call",
+            final Object request = call("tools/call",
                     "{\"name\":\"" + tool + "\",\"arguments\":{}}", idJson);
             this.thread = new Thread(new Runnable() {
                 @Override public void run() {
@@ -382,8 +383,9 @@ public class McpCancellationTest {
         return ctx;
     }
 
-    private JsonNode notify(String method, String paramsJson) throws Exception {
-        return mapper.readTree("{\"jsonrpc\":\"2.0\",\"method\":\"" + method + "\""
+    // 通知树走 Wire.parse: handler 现在收 z-util 的树(理由同 McpProtocolHandlerTest.call)。
+    private Object notify(String method, String paramsJson) throws Exception {
+        return Wire.readOrThrow("{\"jsonrpc\":\"2.0\",\"method\":\"" + method + "\""
                 + (paramsJson == null ? "" : ",\"params\":" + paramsJson) + "}");
     }
 
@@ -394,18 +396,17 @@ public class McpCancellationTest {
         return running.reply;
     }
 
-    private JsonNode call(String method, String paramsJson, String idJson) {
+    private Object call(String method, String paramsJson, String idJson) {
         try {
-            return mapper.readTree("{\"jsonrpc\":\"2.0\",\"id\":" + idJson + ",\"method\":\"" + method
+            return Wire.readOrThrow("{\"jsonrpc\":\"2.0\",\"id\":" + idJson + ",\"method\":\"" + method
                     + "\"" + (paramsJson == null ? "" : ",\"params\":" + paramsJson) + "}");
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
     }
 
-    @SuppressWarnings("unchecked")
     private Map<String, Object> wireMap(Object value) {
-        return value == null ? null : mapper.convertValue(value, Map.class);
+        return Wire.toMap(value);
     }
 
     @SuppressWarnings("unchecked")

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zifang.z.mcp.api.dto.CallToolResult;
 import com.zifang.z.mcp.api.dto.McpToolDto;
+import com.zifang.z.mcp.core.json.Wire;
 import com.zifang.z.mcp.core.properties.McpProperties;
 import org.junit.Test;
 
@@ -107,7 +108,7 @@ public class McpRemoteClientTest {
     }
 
     private McpRemoteClient client(Script script, McpProperties.ServerConfig config) {
-        return new McpRemoteClient("upstream", config, script, mapper, "z-mcp", "0.2.0");
+        return new McpRemoteClient("upstream", config, script, "z-mcp", "0.2.0");
     }
 
     // ------------------------------------------------------------------ 握手
@@ -123,8 +124,8 @@ public class McpRemoteClientTest {
         assertEquals("2025-06-18", c.protocolVersion());
         assertEquals("sess-9", c.sessionId());
         assertNotNull(c.serverInfo());
-        assertEquals("upstream", c.serverInfo().get("name").asText());
-        assertTrue(c.capabilities().has("tools"));
+        assertEquals("upstream", Wire.asText(Wire.get(c.serverInfo(), "name")));
+        assertTrue(Wire.hasKey(c.capabilities(), "tools"));
 
         JsonNode init = script.bodyOf(0);
         assertEquals("initialize", init.get("method").asText());
@@ -376,7 +377,7 @@ public class McpRemoteClientTest {
 
     @Test
     public void sse_data_fields_are_joined_and_comment_frames_ignored() throws Exception {
-        List<JsonNode> frames = McpRemoteClient.ssePayloads(
+        List<Object> frames = McpRemoteClient.ssePayloads(
                 ": keepalive\n"
                         + "id: 1\n"
                         + "event: message\n"
@@ -385,11 +386,11 @@ public class McpRemoteClientTest {
                         + "\n"
                         + "data: not json at all\n"
                         + "\n"
-                        + "data: {\"b\":2}\n", mapper);
+                        + "data: {\"b\":2}\n");
 
         assertEquals(2, frames.size());
-        assertEquals(1, frames.get(0).get("a").asInt());
-        assertEquals(2, frames.get(1).get("b").asInt());
+        assertEquals(1, Wire.get(frames.get(0), "a"));
+        assertEquals(2, Wire.get(frames.get(1), "b"));
     }
 
     // ------------------------------------------------------------------ 翻页

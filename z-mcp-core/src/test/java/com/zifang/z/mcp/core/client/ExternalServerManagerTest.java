@@ -134,7 +134,7 @@ public class ExternalServerManagerTest {
                             return e;
                         }
                     };
-            manager = new ExternalServerManager(registry, properties, mapper, factory);
+            manager = new ExternalServerManager(registry, properties, factory);
         }
 
         McpProperties.ServerConfig server(String name) {
@@ -482,7 +482,7 @@ public class ExternalServerManagerTest {
     @Test
     public void the_deprecated_http_sse_transport_is_refused_with_a_reason() throws Exception {
         ExternalServerManager.ExchangeFactory factory =
-                ExternalServerManager.defaultFactory(new McpProperties(), mapper);
+                ExternalServerManager.defaultFactory(new McpProperties());
         McpProperties.ServerConfig c = new McpProperties.ServerConfig();
         c.setName("legacy");
         c.setTransport("http+sse");
@@ -499,7 +499,7 @@ public class ExternalServerManagerTest {
     @Test
     public void an_http_transport_without_an_endpoint_is_refused() throws Exception {
         ExternalServerManager.ExchangeFactory factory =
-                ExternalServerManager.defaultFactory(new McpProperties(), mapper);
+                ExternalServerManager.defaultFactory(new McpProperties());
         McpProperties.ServerConfig c = new McpProperties.ServerConfig();
         c.setName("nohost");
         c.setTransport("http");
@@ -514,7 +514,7 @@ public class ExternalServerManagerTest {
     @Test
     public void streamable_http_aliases_are_all_accepted() throws Exception {
         ExternalServerManager.ExchangeFactory factory =
-                ExternalServerManager.defaultFactory(new McpProperties(), mapper);
+                ExternalServerManager.defaultFactory(new McpProperties());
         for (String transport : new String[]{"http", "streamable-http", "HTTP", "http+json"}) {
             McpProperties.ServerConfig c = new McpProperties.ServerConfig();
             c.setName("t");

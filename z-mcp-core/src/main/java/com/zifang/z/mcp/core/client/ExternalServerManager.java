@@ -1,9 +1,9 @@
 package com.zifang.z.mcp.core.client;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zifang.z.mcp.api.dto.CallToolResult;
 import com.zifang.z.mcp.api.dto.McpServerDto;
 import com.zifang.z.mcp.api.dto.McpToolDto;
+import com.zifang.z.mcp.core.json.Wire;
 import com.zifang.z.mcp.core.properties.McpProperties;
 import com.zifang.z.mcp.core.protocol.McpSchema;
 import com.zifang.z.mcp.core.registry.McpRegistry;
@@ -55,7 +55,6 @@ public class ExternalServerManager {
 
     private final McpRegistry registry;
     private final McpProperties properties;
-    private final ObjectMapper mapper;
     private final ExchangeFactory factory;
     private final Map<String, Managed> managed = new LinkedHashMap<String, Managed>();
     private ScheduledExecutorService scheduler;
@@ -81,20 +80,18 @@ public class ExternalServerManager {
      */
     private boolean destroyed;
 
-    public ExternalServerManager(McpRegistry registry, McpProperties properties, ObjectMapper mapper) {
-        this(registry, properties, mapper, defaultFactory(properties, mapper));
+    public ExternalServerManager(McpRegistry registry, McpProperties properties) {
+        this(registry, properties, defaultFactory(properties));
     }
 
-    public ExternalServerManager(McpRegistry registry, McpProperties properties, ObjectMapper mapper,
+    public ExternalServerManager(McpRegistry registry, McpProperties properties,
                                  ExchangeFactory factory) {
         this.registry = registry;
         this.properties = properties;
-        this.mapper = mapper;
         this.factory = factory;
     }
 
-    public static ExchangeFactory defaultFactory(final McpProperties properties,
-                                                 final ObjectMapper mapper) {
+    public static ExchangeFactory defaultFactory(final McpProperties properties) {
         return new ExchangeFactory() {
             @Override
             public JsonRpcExchange create(McpProperties.ServerConfig config) throws IOException {
@@ -104,8 +101,7 @@ public class ExternalServerManager {
                     List<String> command = new ArrayList<String>();
                     command.add(config.getCommand());
                     if (config.getArgs() != null) command.addAll(config.getArgs());
-                    return new StdioJsonRpcExchange(command, mapper,
-                            config.getReadTimeoutMillis());
+                    return new StdioJsonRpcExchange(command, config.getReadTimeoutMillis());
                 }
                 if ("http".equals(transport) || "streamable-http".equals(transport)
                         || "http+json".equals(transport)) {
@@ -161,7 +157,7 @@ public class ExternalServerManager {
                     ((JsonRpcExchange.PushCapable) exchange)
                             .onUpstreamNotification(listenerFor(m));
                 }
-                m.client = new McpRemoteClient(name, config, exchange, mapper,
+                m.client = new McpRemoteClient(name, config, exchange,
                         properties.getServerName(), properties.getServerVersion());
             }
             if (!m.client.isConnected()) m.client.connect();
@@ -169,8 +165,7 @@ public class ExternalServerManager {
             // 对岸的目录装的是我这台的副本, 撞名分支会给它 invent 一个新前缀名 —— 每同步一轮长一代,
             // 实测十分钟里目录从 150 涨到 228. 判据取握手回来的 serverInfo.name 而不是 endpoint:
             // 换端口、走 localhost 还是走机器名, 自指都是同一个名字.
-            String advertised = m.client.serverInfo() == null
-                    ? null : m.client.serverInfo().path("name").asText(null);
+            String advertised = Wire.asText(Wire.get(m.client.serverInfo(), "name"));
             if (advertised != null && advertised.equals(properties.getServerName())) {
                 detach(m, "self-referential");
                 m.lastError = "upstream " + name + " identifies itself as this server (" + advertised

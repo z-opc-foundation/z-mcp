@@ -1,9 +1,6 @@
 package com.zifang.z.mcp.core.protocol;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.zifang.z.mcp.core.json.Wire;
 import com.zifang.z.mcp.api.dto.CallToolResult;
 import com.zifang.z.mcp.api.dto.ContentBlock;
 import com.zifang.z.mcp.api.dto.JsonRpcResponse;
@@ -52,14 +49,12 @@ public class McpProtocolHandler {
 
     private final McpRegistry registry;
     private final McpProperties properties;
-    private final ObjectMapper mapper;
     private final JsonSchemaValidator validator = new JsonSchemaValidator();
     private final ExecutorService toolPool;
 
-    public McpProtocolHandler(McpRegistry registry, McpProperties properties, ObjectMapper mapper) {
+    public McpProtocolHandler(McpRegistry registry, McpProperties properties) {
         this.registry = registry;
         this.properties = properties;
-        this.mapper = mapper;
         this.toolPool = Executors.newCachedThreadPool(new NamedThreadFactory("z-mcp-tool-"));
     }
 
@@ -96,20 +91,20 @@ public class McpProtocolHandler {
      * @param request 已解析的 JSON-RPC 请求节点
      * @param ctx     传输层上下文
      */
-    public Reply handle(JsonNode request, RequestContext ctx) {
-        if (request == null || !request.isObject()) {
+    public Reply handle(Object request, RequestContext ctx) {
+        if (!Wire.isObject(request)) {
             return new Reply(JsonRpcResponse.error(McpException.INVALID_REQUEST,
                     "request must be a JSON-RPC 2.0 object", null), false);
         }
-        JsonNode idNode = request.get("id");
-        Object id = idNode == null || idNode.isNull() ? null : mapper.convertValue(idNode, Object.class);
-        JsonNode methodNode = request.get("method");
-        if (methodNode == null || !methodNode.isTextual() || methodNode.asText().isEmpty()) {
+        Object idNode = Wire.get(request, "id");
+        Object id = idNode == null ? null : Wire.toPlain(idNode);
+        Object methodNode = Wire.get(request, "method");
+        if (!Wire.isTextual(methodNode) || Wire.asText(methodNode).isEmpty()) {
             return new Reply(JsonRpcResponse.error(McpException.INVALID_REQUEST,
                     "method is required", id), false);
         }
-        String method = methodNode.asText();
-        if (idNode != null && idNode.isNull()) {
+        String method = Wire.asText(methodNode);
+        if (hasExplicitNullId(request)) {
             // JSON-RPC 2.0 把 null 这个 id 留给"响应方连 id 都取不到"的情形, 并规定请求里的 id MUST NOT 为
             // null; 官方 SDK 的 schema 同样只收 string|number。当"没有 id"静默收下, 客户端就会为一条永远
             // 不会来的答案白等到读超时; 报错至少让它立刻知道是这条消息写错了。
@@ -118,8 +113,8 @@ public class McpProtocolHandler {
         }
         boolean isNotification = idNode == null;
         ctx.requestKey = isNotification ? null : requestKey(idNode);
-        JsonNode params = request.get("params");
-        if (params != null && !params.isNull() && !params.isObject()) {
+        Object params = Wire.get(request, "params");
+        if (params != null && !Wire.isObject(params)) {
             return new Reply(JsonRpcResponse.error(McpException.INVALID_PARAMS,
                     "params must be an object when present", id), false);
         }
@@ -161,28 +156,38 @@ public class McpProtocolHandler {
      * 这里因此把类型编进键里, 否则一个发 {@code requestId: 1} 的客户端就能取消掉同会话里另一个
      * 发 {@code requestId: "1"} 的请求(而这两条在客户端眼里毫不相干)。
      */
-    static String requestKey(JsonNode id) {
-        if (id == null || id.isNull()) return null;
-        if (id.isTextual()) return "s:" + id.asText();
-        if (id.isNumber()) return "n:" + id.numberValue().toString();
-        if (id.isBoolean()) return "b:" + id.asBoolean();
-        return "j:" + id.toString();
+    static String requestKey(Object id) {
+        if (id == null) return null;
+        if (Wire.isTextual(id)) return "s:" + Wire.asText(id);
+        if (Wire.isNumber(id)) return "n:" + Wire.number(id).toString();
+        if (Wire.isBoolean(id)) return "b:" + id;
+        return "j:" + Wire.write(id);
+    }
+
+    /**
+     * "id 这个键在, 而它的值是 JSON null" —— 与"压根没有 id"分得开的那一格。
+     *
+     * <p>z-util 的树把 JSON null 落成 Java null, 于是 {@code Wire.get} 对这两种情形同返 null;
+     * 而协议在这一点上恰恰要区别对待(见调用处那段注释), 所以只能按键在场与否判。
+     */
+    private static boolean hasExplicitNullId(Object request) {
+        return Wire.hasKey(request, "id") && Wire.get(request, "id") == null;
     }
 
     // ------------------------------------------------------------ 生命周期
 
-    private JsonRpcResponse initialize(JsonNode params, Object id, RequestContext ctx) {
+    private JsonRpcResponse initialize(Object params, Object id, RequestContext ctx) {
         if (params == null) throw McpException.invalidParams("params are required for initialize");
-        JsonNode requested = params.get("protocolVersion");
-        if (requested == null || !requested.isTextual()) {
+        Object requested = Wire.get(params, "protocolVersion");
+        if (!Wire.isTextual(requested)) {
             throw McpException.invalidParams("params.protocolVersion is required");
         }
-        JsonNode clientInfo = params.get("clientInfo");
-        if (clientInfo == null || !clientInfo.isObject()) {
+        Object clientInfo = Wire.get(params, "clientInfo");
+        if (!Wire.isObject(clientInfo)) {
             throw McpException.invalidParams("params.clientInfo is required");
         }
-        String version = McpSchema.negotiate(requested.asText());
-        boolean downgrade = !version.equals(requested.asText());
+        String version = McpSchema.negotiate(Wire.asText(requested));
+        boolean downgrade = !version.equals(Wire.asText(requested));
         ctx.negotiatedVersion = version;
         ctx.protocolVersion = version;
         ctx.initialized = true;
@@ -197,11 +202,11 @@ public class McpProtocolHandler {
         }
         if (downgrade) {
             log.info("client requested unsupported protocolVersion {}, serving {}",
-                    requested.asText(), version);
+                    Wire.asText(requested), version);
         }
-        if (ctx.session != null && clientInfo.has("name")) {
+        if (ctx.session != null && Wire.hasKey(clientInfo, "name")) {
             @SuppressWarnings("unchecked")
-            Map<String, Object> info = mapper.convertValue(clientInfo, Map.class);
+            Map<String, Object> info = Wire.toMap(clientInfo);
             ctx.session.setClientInfo(info);
         }
         return JsonRpcResponse.ok(result, id);
@@ -217,23 +222,23 @@ public class McpProtocolHandler {
         return caps;
     }
 
-    private void acceptNotification(String method, JsonNode params, RequestContext ctx) {
+    private void acceptNotification(String method, Object params, RequestContext ctx) {
         if (McpSchema.M_NOTIFICATION_INITIALIZED.equals(method)) {
             if (ctx.session != null) ctx.session.markInitialized();
             return;
         }
         if (McpSchema.M_NOTIFICATION_CANCELLED.equals(method)) {
-            JsonNode target = params == null ? null : params.get("requestId");
-            if (target == null || target.isNull() || ctx.session == null) {
+            Object target = params == null ? null : Wire.get(params, "requestId");
+            if (target == null || ctx.session == null) {
                 // 协议明确要求这种 race 要被"优雅地"处理: 通知不得产生任何响应, 因此这里既不能
                 // 报错也不能回包 —— 只能什么都不做。
                 log.debug("cancel notification with nothing to cancel (session {})",
                         ctx.session == null ? "-" : ctx.session.getId());
                 return;
             }
-            JsonNode why = params.get("reason");
+            Object why = Wire.get(params, "reason");
             ctx.session.cancelRequest(requestKey(target),
-                    why == null || !why.isTextual() ? null : why.asText());
+                    !Wire.isTextual(why) ? null : Wire.asText(why));
             return;
         }
         // 其余 notification(如客户端的 initialized 完成信号变体 / 未知根变更)按协议静默接受
@@ -249,7 +254,7 @@ public class McpProtocolHandler {
 
     // ---------------------------------------------------------------- 分发
 
-    Object dispatch(String method, JsonNode params, RequestContext ctx) {
+    Object dispatch(String method, Object params, RequestContext ctx) {
         switch (method) {
             case McpSchema.M_PING:
                 // 协议: ping 的结果是空对象. {"pong":true} 是 0.1.x 的自造形状.
@@ -281,7 +286,7 @@ public class McpProtocolHandler {
 
     // ---------------------------------------------------------------- tools
 
-    private Map<String, Object> toolsList(JsonNode params) {
+    private Map<String, Object> toolsList(Object params) {
         String cursor = textParam(params, "cursor");
         McpRegistry.Page<McpToolDto> page;
         try {
@@ -341,27 +346,27 @@ public class McpProtocolHandler {
         return sb.toString();
     }
 
-    private JsonNode parseSchema(String json, String toolName, String which) {
-        JsonNode node;
+    private Object parseSchema(String json, String toolName, String which) {
+        Object node;
         try {
-            node = mapper.readTree(json);
+            node = Wire.readOrThrow(json);
         } catch (Exception e) {
             log.warn("tool {} has unparsable {}: {} — emitting permissive object schema",
                     toolName, which, describe(e));
             return permissiveSchema();
         }
-        if (node == null || node.isNull() || node.isMissingNode() || !node.isObject()) {
+        if (!Wire.isObject(node)) {
             log.warn("tool {} has {} that is not a JSON object ({}) — emitting permissive object schema",
-                    toolName, which, node == null ? "absent" : String.valueOf(node.getNodeType()));
+                    toolName, which, Wire.jsonType(node));
             return permissiveSchema();
         }
-        return toMcpSchemaShape((ObjectNode) node, toolName, which);
+        return toMcpSchemaShape(Wire.toMap(node), toolName, which);
     }
 
-    private ObjectNode permissiveSchema() {
-        ObjectNode fallback = mapper.createObjectNode();
+    private Map<String, Object> permissiveSchema() {
+        Map<String, Object> fallback = new LinkedHashMap<String, Object>();
         fallback.put("type", "object");
-        fallback.set("properties", mapper.createObjectNode());
+        fallback.put("properties", new LinkedHashMap<String, Object>());
         return fallback;
     }
 
@@ -379,35 +384,38 @@ public class McpProtocolHandler {
      *
      * <p>未知关键字与 {@code $ref}/{@code $defs} 原样放过: 两家客户端都收, 规范那两个槽也没锁死
      * {@code additionalProperties}, 抹掉它们才是替上游做决定.
+     *
+     * <p>改写而不是就地改: 迁到 z-util 之前这里是把 {@code ObjectNode} 当可变容器用
+     * ({@code put}/{@code set}/{@code remove}), 而 z-util 的 {@code JsonObject} 只剩 {@code put} 与
+     * {@code remove}、{@code put} 还不返回值 —— 改一个槽得先摘再插, 与其在这里做一套
+     * "可变视图"的封装, 不如摊成普通 {@link LinkedHashMap} 逐格替换: 键序与读到的顺序都保得住,
+     * 而写出来仍是同一串字节。
      */
-    private JsonNode toMcpSchemaShape(ObjectNode schema, String toolName, String which) {
-        JsonNode type = schema.get("type");
-        if (type == null || type.isMissingNode() || type.isNull()) {
+    private Map<String, Object> toMcpSchemaShape(Map<String, Object> schema, String toolName, String which) {
+        Object type = schema.get("type");
+        if (type == null) {
             // 补 "object" 不加强约束: 这个槽的语义本来就是"某个对象的形状".
             schema.put("type", "object");
             log.warn("tool {} declares {} without a root type; filling in \"object\" as the MCP schema demands",
                     toolName, which);
-        } else if (!type.isTextual() || !"object".equals(type.asText())) {
+        } else if (!"object".equals(Wire.asText(type))) {
             log.warn("tool {} declares {} with root type {} — MCP pins this slot to \"object\"; "
-                    + "emitting permissive object schema", toolName, which, type.asText());
+                    + "emitting permissive object schema", toolName, which, Wire.literal(type));
             return permissiveSchema();
         }
 
-        JsonNode props = schema.get("properties");
+        Object props = schema.get("properties");
         if (props != null) {
-            if (!props.isObject()) {
+            if (!Wire.isObject(props)) {
                 schema.remove("properties");
                 log.warn("tool {}'s {}.properties is {} rather than an object; dropping the slot",
-                        toolName, which, String.valueOf(props.getNodeType()));
+                        toolName, which, Wire.jsonType(props));
             } else {
-                ObjectNode obj = (ObjectNode) props;
+                Map<String, Object> obj = Wire.toMap(props);
                 int widened = 0;
-                Iterator<String> fields = obj.fieldNames();
-                while (fields.hasNext()) {
-                    String field = fields.next();
-                    JsonNode value = obj.get(field);
-                    if (value == null || !value.isObject()) {
-                        obj.putObject(field);
+                for (String field : new ArrayList<String>(obj.keySet())) {
+                    if (!Wire.isObject(obj.get(field))) {
+                        obj.put(field, new LinkedHashMap<String, Object>());
                         widened++;
                     }
                 }
@@ -419,46 +427,46 @@ public class McpProtocolHandler {
             }
         }
 
-        JsonNode required = schema.get("required");
+        Object required = schema.get("required");
         if (required != null) {
-            if (!required.isArray()) {
+            if (!Wire.isArray(required)) {
                 schema.remove("required");
                 log.warn("tool {}'s {}.required is {} rather than an array; dropping the slot",
-                        toolName, which, String.valueOf(required.getNodeType()));
+                        toolName, which, Wire.jsonType(required));
             } else {
-                ArrayNode kept = mapper.createArrayNode();
-                for (JsonNode r : required) if (r.isTextual()) kept.add(r.asText());
-                if (kept.size() == 0) schema.remove("required");
-                else schema.set("required", kept);
-                if (kept.size() != required.size()) {
+                List<String> kept = new ArrayList<String>();
+                for (Object r : Wire.elements(required)) if (Wire.isTextual(r)) kept.add(Wire.asText(r));
+                if (kept.isEmpty()) schema.remove("required");
+                else schema.put("required", kept);
+                if (kept.size() != Wire.size(required)) {
+                    int dropped = Wire.size(required) - kept.size();
                     log.warn("tool {}'s {}.required has {} non-string entr{}; dropping them",
-                            toolName, which, required.size() - kept.size(),
-                            required.size() - kept.size() == 1 ? "y" : "ies");
+                            toolName, which, dropped, dropped == 1 ? "y" : "ies");
                 }
             }
         }
         return schema;
     }
 
-    private Map<String, Object> toolsCall(JsonNode params, RequestContext ctx) {
+    private Map<String, Object> toolsCall(Object params, RequestContext ctx) {
         if (params == null) throw McpException.invalidParams("params.name is required");
-        JsonNode nameNode = params.get("name");
-        if (nameNode == null || !nameNode.isTextual() || nameNode.asText().isEmpty()) {
+        Object nameNode = Wire.get(params, "name");
+        if (!Wire.isTextual(nameNode) || Wire.asText(nameNode).isEmpty()) {
             throw McpException.invalidParams("params.name must be a non-empty string");
         }
-        String name = nameNode.asText();
+        String name = Wire.asText(nameNode);
         McpRegistry.ToolEntry entry = registry.lookup(name);
         if (entry == null) throw McpException.toolNotFound(name); // 协议: -32602
 
-        JsonNode args = params.get("arguments");
-        if (args == null || args.isNull()) {
-            args = mapper.createObjectNode();
-        } else if (!args.isObject()) {
+        Object args = Wire.get(params, "arguments");
+        if (args == null) {
+            args = new LinkedHashMap<String, Object>();
+        } else if (!Wire.isObject(args)) {
             throw McpException.invalidParams("params.arguments must be an object");
         }
 
         if (properties.isValidateArguments()) {
-            JsonNode schema = parseSchema(entry.schemaJson, name, "inputSchema");
+            Object schema = parseSchema(entry.schemaJson, name, "inputSchema");
             List<String> violations = validator.validate(schema, args);
             if (!violations.isEmpty()) {
                 // 2025-11-25(SEP-1303): 入参校验失败属于**执行错误**, 让 LLM 有机会改参数重试
@@ -467,7 +475,7 @@ public class McpProtocolHandler {
             }
         }
 
-        Map<String, Object> arguments = mapper.convertValue(args, Map.class);
+        Map<String, Object> arguments = Wire.toMap(args);
         Object raw;
         try {
             raw = invokeWithTimeout(entry, arguments, ctx);
@@ -543,7 +551,7 @@ public class McpProtocolHandler {
      *
      * <p>形状随返回值怎么变都行, 兑现广告的那一步只有一个出口: 折出来的结果一律过
      * {@link #honorDeclaredOutputSchema}. #61 之前只有"工具体自己交回 CallToolResult"与
-     * Map/JsonNode 两支接了这台校验器, 剩下<b>六条</b>出口(null / 文本与字符 / 数字与布尔 /
+     * Map/树节点 两支接了这台校验器, 剩下<b>六条</b>出口(null / 文本与字符 / 数字与布尔 /
      * 单个内容块 / 内容块列表 / "不像对象"的兜底)都不经它。修法前的探针把这些形状逐个量过
      * (九种绕过形状 + 两份 Map 对照 + 两份未广告对照): 广告了 schema 的九种形状一律
      * {@code isError=null} 且 {@code structuredContent} 缺席, 而同一次运行里 Map 那一支的违例格
@@ -587,13 +595,17 @@ public class McpProtocolHandler {
                 return CallToolResult.of(blocks);
             }
         }
-        boolean objectLike = raw instanceof Map || raw instanceof JsonNode;
+        // 与迁移前逐字同形: 原来判的是 `raw instanceof Map || raw instanceof JsonNode`, 也就是
+        // **只有映射与树**走序列化那一支, 裸 List / 裸 POJO 一律落到 String.valueOf 上。
+        // 迁移时若顺手把 List 也算进来, 工具返回 List<String> 的文本就从 "[a, b]" 变成
+        // ["a","b"] —— 那是改线上字节, 不是修 bug(见 the_same_shapes_stay_untouched 那条用例)。
+        boolean objectLike = raw instanceof Map || Wire.isObject(raw);
         if (!objectLike) {
             return CallToolResult.text(String.valueOf(raw));
         }
         try {
-            JsonNode node = raw instanceof JsonNode ? (JsonNode) raw : mapper.valueToTree(raw);
-            String json = mapper.writeValueAsString(node);
+            Object node = raw;
+            String json = Wire.write(node);
             if (entry.outputSchemaJson != null && !entry.outputSchemaJson.trim().isEmpty()) {
                 CallToolResult structured = CallToolResult.structured(node, json);
                 structured.setStructuredContent(node);
@@ -627,8 +639,11 @@ public class McpProtocolHandler {
                     + " declares an outputSchema but returned no structuredContent");
         }
         try {
-            JsonNode node = structured instanceof JsonNode
-                    ? (JsonNode) structured : mapper.valueToTree(structured);
+            // structuredContent 由工具作者手搭, 里面是什么类型不受我们管(可能是一棵
+            // 别的库的树、也可能就是普通 Map)。校验器只认 z-util 的树与普通容器, 所以在这里
+            // 摊平一次 —— 摊不动的值交给下一行的 catch 出"这个值序列化不了", 而不是让它
+            // 一路走到校验器那里被读成"不是对象"。
+            Object node = Wire.toPlain(structured);
             List<String> violations =
                     validator.validate(parseSchema(declared, entry.name, "outputSchema"), node);
             if (!violations.isEmpty()) {
@@ -648,7 +663,7 @@ public class McpProtocolHandler {
 
     // ------------------------------------------------------------ resources
 
-    private Map<String, Object> resourcesList(JsonNode params) {
+    private Map<String, Object> resourcesList(Object params) {
         String cursor = textParam(params, "cursor");
         List<Map<String, Object>> out = new ArrayList<Map<String, Object>>();
         McpRegistry.Page<McpResourceDto> page;
@@ -664,7 +679,7 @@ public class McpProtocolHandler {
         return result;
     }
 
-    private Map<String, Object> resourceTemplatesList(JsonNode params) {
+    private Map<String, Object> resourceTemplatesList(Object params) {
         String cursor = textParam(params, "cursor");
         List<Map<String, Object>> out = new ArrayList<Map<String, Object>>();
         McpRegistry.Page<McpResourceDto> page;
@@ -686,7 +701,7 @@ public class McpProtocolHandler {
         return result;
     }
 
-    private Map<String, Object> resourcesRead(JsonNode params) {
+    private Map<String, Object> resourcesRead(Object params) {
         String uri = params == null ? null : textParam(params, "uri");
         if (uri == null || uri.isEmpty()) throw McpException.invalidParams("params.uri is required");
         McpResourceDto resource = registry.lookupResource(uri);
@@ -696,9 +711,9 @@ public class McpProtocolHandler {
         }
         ContentBlock block;
         try {
-            block = resource.getReader().read(mapper.convertValue(
-                    params.get("arguments") == null ? mapper.createObjectNode() : params.get("arguments"),
-                    Map.class));
+            block = resource.getReader().read(Wire.toMap(
+                    Wire.get(params, "arguments") == null
+                            ? new LinkedHashMap<String, Object>() : Wire.get(params, "arguments")));
         } catch (Exception e) {
             throw McpException.invalidParams("resource " + uri + " is not readable: " + describe(e));
         }
@@ -878,7 +893,7 @@ public class McpProtocolHandler {
 
     // -------------------------------------------------------------- prompts
 
-    private Map<String, Object> promptsList(JsonNode params) {
+    private Map<String, Object> promptsList(Object params) {
         String cursor = textParam(params, "cursor");
         McpRegistry.Page<McpPromptDto> page;
         try {
@@ -894,17 +909,17 @@ public class McpProtocolHandler {
         return result;
     }
 
-    private Map<String, Object> promptsGet(JsonNode params) {
+    private Map<String, Object> promptsGet(Object params) {
         String name = params == null ? null : textParam(params, "name");
         if (name == null || name.isEmpty()) throw McpException.invalidParams("params.name is required");
         McpPromptDto prompt = registry.lookupPrompt(name);
         if (prompt == null) throw McpException.promptNotFound(name);
-        JsonNode argNode = params.get("arguments");
-        if (argNode == null || !argNode.isObject()) {
-            argNode = mapper.createObjectNode();
+        Object argNode = Wire.get(params, "arguments");
+        if (!Wire.isObject(argNode)) {
+            argNode = new LinkedHashMap<String, Object>();
         }
         for (McpPromptDto.Arg a : prompt.getArguments()) {
-            if (a.isRequired() && !argNode.has(a.getName())) {
+            if (a.isRequired() && !Wire.hasKey(argNode, a.getName())) {
                 throw McpException.invalidParams("missing required prompt argument: " + a.getName());
             }
         }
@@ -912,7 +927,7 @@ public class McpProtocolHandler {
         try {
             messages = prompt.getComposer() == null
                     ? new ArrayList<Map<String, Object>>()
-                    : prompt.getComposer().compose(mapper.convertValue(argNode, Map.class));
+                    : prompt.getComposer().compose(Wire.toMap(argNode));
         } catch (Exception e) {
             throw McpException.invalidParams("prompt " + name + " could not be composed: " + describe(e));
         }
@@ -1011,7 +1026,7 @@ public class McpProtocolHandler {
 
     // -------------------------------------------------------------- logging
 
-    private Map<String, Object> loggingSetLevel(JsonNode params, RequestContext ctx) {
+    private Map<String, Object> loggingSetLevel(Object params, RequestContext ctx) {
         String level = params == null ? null : textParam(params, "level");
         if (level == null || !isKnownLevel(level)) {
             throw McpException.invalidParams("params.level must be one of debug/info/notice/"
@@ -1044,7 +1059,7 @@ public class McpProtocolHandler {
         n.put("method", McpSchema.N_MESSAGE);
         n.put("params", params);
         try {
-            s.emit(mapper.writeValueAsString(n));
+            s.emit(Wire.write(n));
         } catch (Exception e) {
             log.debug("failed to emit log notification: {}", e.toString());
         }
@@ -1057,7 +1072,7 @@ public class McpProtocolHandler {
         n.put("method", method);
         String json;
         try {
-            json = mapper.writeValueAsString(n);
+            json = Wire.write(n);
         } catch (Exception e) {
             return;
         }
@@ -1066,10 +1081,9 @@ public class McpProtocolHandler {
 
     // ---------------------------------------------------------------- 杂项
 
-    static String textParam(JsonNode params, String key) {
+    static String textParam(Object params, String key) {
         if (params == null) return null;
-        JsonNode v = params.get(key);
-        return v == null || v.isNull() ? null : v.asText();
+        return Wire.asText(Wire.get(params, key));
     }
 
     private static String join(List<String> parts, String sep) {

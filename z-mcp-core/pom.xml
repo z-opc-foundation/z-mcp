@@ -42,9 +42,20 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot</artifactId>
         </dependency>
+        <!-- JSON-RPC 的读写由这族承接(JsonUtil/JsonCursor/JsonObject/JsonArray), 版本由仓根 DM 下发。 -->
+        <dependency>
+            <groupId>io.github.yuku123</groupId>
+            <artifactId>z-util-parser-json</artifactId>
+        </dependency>
+        <!-- 主源码已零 Jackson。这条只在测试期留着, 而且是**故意**留的:
+             测试用例拿 Jackson 读回服务端写出的 JSON-RPC 信封, 于是 WireContractTest 钉的那批
+             字面量是由一个与生产序列化器不同的解析器判定的 —— 若 z-util 把 {"a":1} 写成
+             {"a": 1.0} 或加了引号, 测出来的是"对端真的收不到"而不是"我们自己的实现自洽"。
+             迁测试时把它一起换成 Wire 只会让这个独立性消失, 所以不进主源码。 -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
+            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>

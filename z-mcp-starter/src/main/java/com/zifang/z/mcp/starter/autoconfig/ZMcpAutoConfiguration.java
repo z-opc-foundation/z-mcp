@@ -1,6 +1,5 @@
 package com.zifang.z.mcp.starter.autoconfig;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zifang.z.mcp.core.builtin.BuiltinTools;
 import com.zifang.z.mcp.core.client.ExternalServerManager;
 import com.zifang.z.mcp.core.properties.McpProperties;
@@ -44,7 +43,7 @@ public class ZMcpAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public McpRegistry mcpRegistry(McpProperties properties, ObjectMapper mapper) {
+    public McpRegistry mcpRegistry(McpProperties properties) {
         McpRegistry registry = new McpRegistry();
         registry.setStrictToolNames(properties.isStrictToolNames());
         // 版本以打包进 MANIFEST 的 Implementation-Version 为准, 配置值只作兜底
@@ -53,7 +52,7 @@ public class ZMcpAutoConfiguration {
             properties.setServerVersion(manifestVersion);
         }
         if (properties.isBuiltinToolsEnabled()) {
-            BuiltinTools.registerAll(registry, properties, mapper);
+            BuiltinTools.registerAll(registry, properties);
         } else {
             // 关掉之后目录空掉是一种"看起来像装配没生效"的状态, 留一行字给排障的人.
             log.info("z-mcp builtin tools disabled by z.mcp.builtin-tools-enabled=false;"
@@ -77,8 +76,8 @@ public class ZMcpAutoConfiguration {
     @Bean(destroyMethod = "destroy")
     @ConditionalOnMissingBean
     public McpProtocolHandler mcpProtocolHandler(McpRegistry registry, McpProperties properties,
-                                                 ObjectMapper mapper, final McpSessionStore sessions) {
-        final McpProtocolHandler handler = new McpProtocolHandler(registry, properties, mapper);
+                                                 final McpSessionStore sessions) {
+        final McpProtocolHandler handler = new McpProtocolHandler(registry, properties);
         // 注册表变更 → 向所有在线会话推对应类目的 list_changed.
         // 三类必须分开: initialize 时广告的是 tools/resources/prompts 各自的 listChanged=true,
         // 把 prompt 注册播报成 tools/list_changed 等于叫客户端去重刷一份没动的工具表.
@@ -106,9 +105,8 @@ public class ZMcpAutoConfiguration {
      */
     @Bean(destroyMethod = "destroy")
     @ConditionalOnMissingBean
-    public ExternalServerManager externalServerManager(McpRegistry registry, McpProperties properties,
-                                                       ObjectMapper mapper) {
-        final ExternalServerManager manager = new ExternalServerManager(registry, properties, mapper);
+    public ExternalServerManager externalServerManager(McpRegistry registry, McpProperties properties) {
+        final ExternalServerManager manager = new ExternalServerManager(registry, properties);
         if (!properties.getServers().isEmpty()) {
             Thread bootstrap = new Thread(new Runnable() {
                 @Override public void run() {

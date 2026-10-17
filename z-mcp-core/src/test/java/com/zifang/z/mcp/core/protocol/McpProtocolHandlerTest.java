@@ -1,5 +1,6 @@
 package com.zifang.z.mcp.core.protocol;
 
+import com.zifang.z.mcp.core.json.Wire;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zifang.z.mcp.api.dto.CallToolResult;
@@ -45,10 +46,10 @@ public class McpProtocolHandlerTest {
         properties = new McpProperties();
         properties.setServerVersion("9.9.9-test");
         registry = new McpRegistry();
-        com.zifang.z.mcp.core.builtin.BuiltinTools.registerAll(registry, properties, mapper);
+        com.zifang.z.mcp.core.builtin.BuiltinTools.registerAll(registry, properties);
         registerFixtureTools();
         sessions = new McpSessionStore(properties);
-        handler = new McpProtocolHandler(registry, properties, mapper);
+        handler = new McpProtocolHandler(registry, properties);
     }
 
     private void registerFixtureTools() {
@@ -81,16 +82,19 @@ public class McpProtocolHandlerTest {
         return ctx;
     }
 
-    private JsonNode call(String method, String paramsJson, String idJson) throws Exception {
+    // 请求树走 Wire.parse 而不是 mapper.readTree: 生产侧现在收的是 z-util 的树,
+    // 若这里还交一棵 Jackson 树, handler 会按"不是对象"直接拒 —— 那测的就不是协议行而是
+    // 两种库的类型对不上了。断言侧的读回仍用 Jackson(见 mapper 字段)。
+    private Object call(String method, String paramsJson, String idJson) throws Exception {
         String body = "{\"jsonrpc\":\"2.0\",\"id\":" + idJson + ",\"method\":\"" + method + "\""
                 + (paramsJson == null ? "" : ",\"params\":" + paramsJson) + "}";
-        return mapper.readTree(body);
+        return Wire.readOrThrow(body);
     }
 
-    private JsonNode notify(String method, String paramsJson) throws Exception {
+    private Object notify(String method, String paramsJson) throws Exception {
         String body = "{\"jsonrpc\":\"2.0\",\"method\":\"" + method + "\""
                 + (paramsJson == null ? "" : ",\"params\":" + paramsJson) + "}";
-        return mapper.readTree(body);
+        return Wire.readOrThrow(body);
     }
 
     private Map<String, Object> wire(McpProtocolHandler.Reply reply) {
@@ -479,8 +483,12 @@ public class McpProtocolHandlerTest {
                     + "\"required\":[\"count\"]}";
 
     /** 生产者自己排版的 JSON —— 交回一份带 structuredContent 的结果. */
+    // structuredContent 用普通 Map 而不是一棵 Jackson 树: 工具作者在生产里交回的就是
+    // Map/List/Scalar(见 McpProtocolHandler.normalize), 而兑现 outputSchema 的那一段现在
+    // 交给校验器的是摊平后的值。若这里仍造一棵别的库的树, 测出来的会是"两种树的类型对不上",
+    // 而不是"这个工具结果违没违 schema"。断言侧的读回仍走 Jackson。
     private CallToolResult structuredResult(String json) throws Exception {
-        return CallToolResult.structured(mapper.readTree(json), json);
+        return CallToolResult.structured(Wire.toPlain(Wire.readOrThrow(json)), json);
     }
 
     private void registerResultTool(String name, String outputSchema, Object returned) {
@@ -561,7 +569,7 @@ public class McpProtocolHandlerTest {
         // isError 是给模型自我纠正的生产者原话, 改判成校验失败会把它盖掉.
         CallToolResult failed = CallToolResult.text("upstream said no");
         failed.setError(true);
-        failed.setStructuredContent(mapper.readTree("{\"count\":\"seven\"}"));
+        failed.setStructuredContent(Wire.toPlain(Wire.readOrThrow("{\"count\":\"seven\"}")));
         registerResultTool("block_failed", COUNT_SCHEMA, failed);
         Map<String, Object> r = toolsCall("block_failed", "66");
         assertEquals(Boolean.TRUE, r.get("isError"));

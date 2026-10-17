@@ -3,12 +3,12 @@ package com.zifang.z.mcp.starter.bridge;
 import com.zifang.z.mcp.core.registry.McpRegistry;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PostConstruct;
 import java.lang.reflect.Method;
 
 /**
@@ -23,7 +23,7 @@ import java.lang.reflect.Method;
  *   <li>宿主没装 z-agent-center ⇒ {@code com.zifang.z.agent.center.core.agent.tool.ToolRegistry}
  *       不在类路径上。{@link ConditionalOnClass} 守一道（按类元数据判定，不加载类），
  *       类不在时整个 bean 定义都不注册；万一被其他方式强行实例化，
- *       {@link #bind()} 里 {@code Class.forName} 失败也照样空转。
+ *       {@link #afterPropertiesSet()} 里 {@code Class.forName} 失败也照样空转。
  *       <b>这一条以前是崩的</b>：本类原本直接 import ToolRegistry + 静态调 {@code getInstance()}，
  *       {@code NoClassDefFoundError: com/zifang/z/agent/center/core/agent/tool/ToolRegistry}
  *       把整个上下文掀翻。pom 注释里"无 agent-center 时空转"那句话当时并不成立 ——
@@ -43,10 +43,16 @@ import java.lang.reflect.Method;
  * 改成反射: 编译期不再 import ToolRegistry，本模块零 z-agent-center 依赖;
  * 运行期按类元数据 (Class.forName) 探测,缺类时空转,行为不变。
  * 这是 SLF4J / Spring 等"门面库"的标准做法。
+ *
+ * <h2>为什么走 {@link InitializingBean} 而不是 {@code @PostConstruct}</h2>
+ * {@code javax.annotation} 在 Java 11 被移出 JDK, 本仓编译目标是 8 而 CI/本机 JDK 未必是 8 ——
+ * 挂在那个注解上等于把本模块锁死在 JDK 8 才能编译。{@link InitializingBean} 是 Spring 自己的
+ * 契约, 在任何 JDK 上都在。回调时机与 {@code @PostConstruct} 相同(属性注入之后、bean 可用之前),
+ * 所以对外行为不变。
  */
 @Component
 @ConditionalOnClass(name = "com.zifang.z.agent.center.core.agent.tool.ToolRegistry")
-public class McpToolRegistryBindConfig {
+public class McpToolRegistryBindConfig implements InitializingBean {
 
     private static final Logger log = LogManager.getLogger(McpToolRegistryBindConfig.class);
 
@@ -55,8 +61,8 @@ public class McpToolRegistryBindConfig {
     @Autowired
     private ObjectProvider<McpRegistry> mcpRegistryProvider;
 
-    @PostConstruct
-    public void bind() {
+    @Override
+    public void afterPropertiesSet() {
         McpRegistry registry = mcpRegistryProvider.getIfAvailable();
         if (registry == null) {
             log.info("McpRegistry 不可用 (z.mcp.enabled=false?)，跳过 agent 工具表绑定");

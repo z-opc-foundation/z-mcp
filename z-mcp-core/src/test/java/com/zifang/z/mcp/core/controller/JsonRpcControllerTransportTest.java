@@ -50,11 +50,11 @@ public class JsonRpcControllerTransportTest {
     public void setUp() {
         properties = new McpProperties();
         registry = new McpRegistry();
-        BuiltinTools.registerAll(registry, properties, mapper);
+        BuiltinTools.registerAll(registry, properties);
         sessions = new McpSessionStore(properties);
         guard = new TransportSecurityGuard(properties);
-        handler = new McpProtocolHandler(registry, properties, mapper);
-        controller = new JsonRpcController(registry, properties, handler, sessions, guard, mapper);
+        handler = new McpProtocolHandler(registry, properties);
+        controller = new JsonRpcController(registry, properties, handler, sessions, guard);
     }
 
     @After

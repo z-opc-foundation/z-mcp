@@ -124,6 +124,19 @@
                 <artifactId>z-mcp-server</artifactId>
                 <version>${project.version}</version>
             </dependency>
+            <!-- z-util-parser-json: JSON-RPC 的树读写底座。父链下发的 z-util.version=1.0.19,
+                 而 com.zifang.util.json 这一族(JsonUtil/JsonCursor/JsonObject/JsonArray)是后来
+                 才有的, 1.0.19 整个 jar 里 com/zifang/util/json 下 0 个文件 ⇒ 不写死版本就编不过。
+                 版本钉 1.2.8(Central 上的 release), 不跟 fleet 其余仓(z-mist/z-kb 1.2.6、
+                 z-msg/z-gw/z-llm 1.2.2、z-vector 1.2.4)对齐 —— 那些仓钉的是各自迁移当时够用的版本,
+                 本仓要 JsonCursor 这一族, 取最新 release。
+                 与 z-util-core 无冲突: 它只往下带 dsl-kernel → dsl, 不含 core; 而 core 1.0.19
+                 里 com/zifang/util/json 是空的, 两边包空间不重叠。 -->
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-util-parser-json</artifactId>
+                <version>1.2.8</version>
+            </dependency>
             <!-- spring-boot-dependencies 的 import 删掉：地板已经 import 同一格
                  spring-boot-dependencies:2.7.18（z-boot-dependencies/pom.xml:42、224-228），
                  与本仓面值相同 ⇒ 重复 import 只是 dm 打架的来源。 -->
