@@ -432,8 +432,11 @@ public class JsonSchemaValidator {
         if (required != null && isArray(required)) {
             for (Object r : Wire.elements(required)) {
                 String key = asText(r);
-                Object child = get(node, key);
-                if (child == null || isNull(child)) {
+                // required 只问**键在不在**, 不问值是什么 —— 规范原文就是 key existence,
+                // 显式 null 也算满足。原先这里判的是 `get(key) == null`, 于是 {"text":null}
+                // 被报成 missing: 键明明在, 报"缺"是错的, 而且它把下游 properties 的类型判定
+                // 顶掉了 —— null 到底合不合格该由 {"type":"string"} 那一格说, 两条各报各的。
+                if (!hasKey(node, key)) {
                     errors.add(path + ": missing required property '" + key + "'");
                 }
             }

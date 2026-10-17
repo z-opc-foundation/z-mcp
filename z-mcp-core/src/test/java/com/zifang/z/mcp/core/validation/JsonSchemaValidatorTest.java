@@ -49,7 +49,35 @@ public class JsonSchemaValidatorTest {
         assertEquals(1, errorsOf(s, "{}").size());
         assertTrue(errorsOf(s, "{}").get(0).contains("missing required property 'text'"));
         assertTrue(errorsOf(s, "{\"text\":5}").get(0).contains("expected type string"));
-        assertTrue(errorsOf(s, "{\"text\":null}").get(0).contains("missing required property"));
+        // required 只问键在不在: {"text":null} 的键在, required 那一格不该红;
+        // null 到底合不合格归 properties 的类型判定说 —— 报出来的是它, 不是 "missing"。
+        assertTrue(errorsOf(s, "{\"text\":null}").get(0).contains("expected type string"));
+    }
+
+    /**
+     * JSON Schema 的 {@code required} 定义就是 key existence —— 显式 null 也算满足
+     * (规范举的反例正是它: {@code {"required":["a"]}} 配 {@code {"a":null}} 是 VALID)。
+     *
+     * <p>原先的实现判 {@code get(key) == null}, 把"键在但值为 null"报成 missing required。
+     * 在 Jackson 时代这道错同样在(显式 null 读回非空的 NullNode 才恰好躲过, 但
+     * {@code node.get()} 对缺席键也返 null, 所以那时的判据其实是 Jackson 的
+     * {@code has} 而不是这个 —— 换 z-util 后按值判才彻底暴露)。
+     */
+    @Test
+    public void required_is_key_existence_so_explicit_null_satisfies_it() throws Exception {
+        String onlyRequired = "{\"type\":\"object\",\"required\":[\"a\"]}";
+        assertOk(onlyRequired, "{\"a\":null}");
+        assertEquals("键真的不在才报", 1, errorsOf(onlyRequired, "{}").size());
+
+        // 两条各报各的: required 满足, 类型不满足 ⇒ 只剩类型那一条
+        String typed = "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},"
+                + "\"required\":[\"a\"]}";
+        List<String> nulled = errorsOf(typed, "{\"a\":null}");
+        assertEquals(nulled.toString(), 1, nulled.size());
+        assertTrue(nulled.get(0), nulled.get(0).contains("expected type string"));
+        // null 的类型名是 null, 不是 "missing" —— 缺席那一格已由 hasKey 把门挡住,
+        // 走到类型判定时这个 null 就是显式 JSON null, 两种情形不能再混回一处。
+        assertTrue(nulled.get(0).contains("but got null"));
     }
 
     @Test

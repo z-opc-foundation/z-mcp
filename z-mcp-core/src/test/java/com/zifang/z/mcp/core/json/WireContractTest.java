@@ -176,8 +176,19 @@ public class WireContractTest {
         assertFalse(Wire.hasKey(m, "b"));
     }
 
-    // ------------------------------------------------------------ 写不出的值必须报错
+    /** 违规文案里的类型名要与 JSON Schema 的 type 命名一致, 显式 null 叫 "null"。 */
+    @Test
+    void 类型名里null叫null不叫missing() {
+        assertEquals("null", Wire.jsonType(null));
+        assertEquals("string", Wire.jsonType("x"));
+        assertEquals("integer", Wire.jsonType(3));
+        assertEquals("number", Wire.jsonType(1.5d));
+        assertEquals("boolean", Wire.jsonType(Boolean.TRUE));
+        assertEquals("object", Wire.jsonType(Wire.object()));
+        assertEquals("array", Wire.jsonType(Wire.array()));
+    }
 
+    // ------------------------------------------------------------ 写不出的值必须报错
     /** 迁移前 Jackson 反射读 getter, 现在 z-util 会把它写成 {@code {}} —— 内容静默没了。 */
     public static final class Pojo {
         public String getName() { return "n"; }

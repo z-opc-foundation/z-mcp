@@ -230,10 +230,17 @@ public final class Wire {
         return isTextual(node) ? "'" + asText(node) + "'" : write(node);
     }
 
-    /** 违规描述里显示类型用的名字 —— 与 JSON Schema 的 type 命名一致。 */
+    /**
+     * 违规描述里显示类型用的名字 —— 与 JSON Schema 的 type 命名一致。
+     *
+     * <p>{@code null} 报作 {@code "null"} 而不是 "missing": z-util 把 JSON null 落成
+     * Java {@code null}, 而"缺席"那一格在 walk 里已由 {@link #hasKey} 把门挡住了 ——
+     * 走到类型判定时这个 {@code null} 就是显式 JSON null, 说它是 missing 会把两种情形
+     * 又混回一处。
+     */
     public static String jsonType(Object node) {
         if (node == null) {
-            return "missing";
+            return "null";
         }
         if (isObject(node)) {
             return "object";
