@@ -145,12 +145,14 @@
              所以 test scope 里把 z-agent-center-core 列上, 让 McpToolRegistryBindConfigTest
              能走「class 在 classpath」的真路径（反射 + @ConditionalOnClass 双绿）,
              也能在没有 z-agent-center-core 的常规下游环境里走「缺类空转」路径。
-             版本 1.0.1 = z-opc 仓本地面值, Central 暂无 (z-agent-center-core 走 z-opc reactor
-             消费, 不发中央), 写 test scope 严格不污染 src/main 的零依赖面。 -->
+             版本 1.0.0 = z-agent 独立仓首发的迁移版本线（原先钉的 1.0.1 是 z-opc 仓的
+             本地面值, Central 上一直是 404 —— 本仓这条 test 依赖在干净 CI 上本就无解,
+             2026-10-18 z-agent 独立成仓后才真正可解析）。写 test scope 严格不污染
+             src/main 的零依赖面。 -->
         <dependency>
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-agent-center-core</artifactId>
-            <version>1.0.1</version>
+            <version>1.0.0</version>
             <scope>test</scope>
         </dependency>
 
