@@ -24,7 +24,7 @@
 | **仓库** | `z-mcp` |
 | **Maven 坐标** | `io.github.yuku123:z-mcp:${revision}`（`packaging=pom`，聚合五模块） |
 | **当前版本** | `0.2.1`（根 POM `<revision>`，CI-friendly versions + flatten-maven-plugin `1.7.2`，`flattenMode=oss`） |
-| **父项目** | `io.github.yuku123:z-boot-parent:1.0.21`（`<relativePath/>` 留空，parent 在 repo1 不在磁盘） |
+| **父项目** | `io.github.yuku123:z-boot-parent:1.1.0`（`<relativePath/>` 留空，parent 在 repo1 不在磁盘） |
 | **模块** | `z-mcp-api` / `z-mcp-core` / `z-mcp-starter` / `z-mcp-admin` / `z-mcp-server`（`<modules>` 实测顺序） |
 | **Maven Central** | 六枚坐标 `0.2.1` **均已发布**（见「发布与构件」的逐枚实测） |
 | **协议口径** | 实现基线 `2025-06-18`，最高采纳 `2025-11-25`（`McpSchema.LATEST_SUPPORTED`） |
@@ -34,8 +34,7 @@
 | **最近更新** | 2026-09-30 |
 
 > 根 POM 里刻意只剩 `<revision>` 一格：Java 口径、UTF-8、`spring-boot.version=2.7.18`
-> 三格与父链面值逐字相同，已删，由 `z-boot-parent` → `z-boot-dependencies`（第三方地板）
-> + `z-boot-fleet`（兄弟仓权威表）下发。
+> 三格与父链面值逐字相同，已删，由 `z-boot-parent:1.1.0` 下发（第三方地板与兄弟仓权威表均已并入 parent 自身）。
 
 ---
 
@@ -202,7 +201,7 @@ JSON-RPC 码），而 `RESOURCE_NOT_FOUND` 仍留 `-32002`（`2025-11-25/server/
 
 ```
 z-mcp/
-├── pom.xml                 # 聚合根 POM：parent z-boot-parent:1.0.21，<revision>0.2.1</revision>，五模块
+├── pom.xml                 # 聚合根 POM：parent z-boot-parent:1.1.0，<revision>0.2.1</revision>，五模块
 ├── z-mcp-api/              # 零依赖 DTO 与异常：JsonRpcRequest/Response、CallToolResult、
 │                           #   ContentBlock（text/image/audio/resource_link/resource 五支 + raw）、
 │                           #   McpToolDto/McpResourceDto/McpPromptDto/McpServerDto、ToolAnnotations、McpException
@@ -236,7 +235,7 @@ z-mcp/
 | 层级 | 技术（均来自 pom 实测） |
 |------|--------------------------|
 | 语言 / 运行时 | Java 8（口径由 `z-boot-parent` 的 `pluginManagement` 下发，产出 class major 52） |
-| 框架 | Spring Boot 2.7.18（`z-boot-dependencies` 地板供给；根 POM 已删重复 import） |
+| 框架 | Spring Boot 2.7.18（`z-boot-parent` 自带地板供给；根 POM 已删重复 import） |
 | HTTP 层 | `spring-web` + `spring-webmvc` + `javax.servlet-api`，SSE 用 `SseEmitter` |
 | 序列化 | `jackson-databind`（唯一 JSON 依赖） |
 | 日志 | `slf4j-api`（core 侧不绑定实现；starter/server 测试期用 `logback-classic`） |
@@ -538,7 +537,7 @@ SPI）是跨仓的架构决定，不在本仓能自己动的范围里。
 
 本仓**确实**已经有下游消费者（上一版 README 记的还是旧账，本次纠正）：
 
-* `z-boot/z-boot-fleet` 的 `<z-mcp.version>` 现钉 `0.2.1`，受管五枚 `z-mcp-*` 坐标；
+* `z-boot-parent` 的 `<z-mcp.version>` 现钉 `0.2.1`，受管五枚 `z-mcp-*` 坐标；
 * `z-boot/z-boot-integration-starters/z-boot-mcp-starter` 直接依赖 `z-mcp-starter`；
 * ✅ 2026-10-05 已补回本仓的闸门：`bash tools/verify_central.sh`（本仓脚本目录是
   `tools/`，不是各仓通行的 `_doc/003_script`；也没跟着铺 `deploy_maven_center.sh`，
@@ -555,5 +554,15 @@ SPI）是跨仓的架构决定，不在本仓能自己动的范围里。
 ## 📄 License
 
 MIT，见 [`LICENSE`](LICENSE)；根 POM 的 `<licenses>` 同声明 MIT License。
+
+---
+
+## 文档目录
+
+本项目文档统一收口在 `_doc/` 下（八类固定编号表，桶按需存在）:
+
+- [`_doc/001_arch/`](_doc/001_arch/) — 架构、接口、DB schema、协议、路线图
+  - [`00-overview.md`](_doc/001_arch/00-overview.md) — 项目总览：模块架构、核心功能、对外集成与上下游、
+    技术特点、目录结构
 
 _Maintained by the z-opc-foundation organization._
