@@ -212,10 +212,15 @@ public class ReadmeClaimsTest {
     }
 
     /**
-     * 去掉行首 #、emoji 与变体选择符，剩下的就是标题文字。
+     * 标题的「基名」：去掉行首 #、emoji，再去掉<b>尾部</b>的括号补充说明。
      *
      * <p>emoji 用码点判断（不吃编译编码的亏）：U+1F300–U+1FAFF、U+2600–U+27BF、
      * 变体选择符 U+FE0F、零宽连接符 U+200D。</p>
+     *
+     * <p>尾部括号（`（…）` / `(…)`）当成<b>装饰</b>剥掉，剩下的基名仍然<b>全等</b>匹配 ——
+     * 于是「模块结构」与「模块结构与约定」照样分得开，又能定位到
+     * `## 🎯 能力清单（逐条对应到代码）` 这种带补充说明的标题。
+     * （z-skill 首版守卫就栽在这儿：整段标题文字全等 ⇒ 永远定位不到小节。）</p>
      */
     private static String headingText(String raw) {
         String t = raw.trim();
@@ -236,7 +241,20 @@ public class ReadmeClaimsTest {
             }
             sb.appendCodePoint(cp);
         }
-        return sb.toString().trim();
+        return stripTrailingParen(sb.toString().trim());
+    }
+
+    /** 去掉标题文字<b>尾部</b>的括号补充说明（`能力清单（逐条对应到代码）` → `能力清单`）。 */
+    private static String stripTrailingParen(String title) {
+        String t = title.trim();
+        while (t.endsWith("）") || t.endsWith(")")) {
+            int open = t.endsWith("）") ? t.lastIndexOf('（') : t.lastIndexOf('(');
+            if (open < 0) {
+                break;
+            }
+            t = t.substring(0, open).trim();
+        }
+        return t;
     }
 
     /**
