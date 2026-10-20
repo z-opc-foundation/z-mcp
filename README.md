@@ -31,7 +31,7 @@
 | **默认端口** | `18095`（hub）/ `18096`（text）/ `18097`（codec），均可被 `Z_MCP_PORT` 覆盖；作为库引入时端口跟随宿主应用 |
 | **运行口径** | Java 8（`maven.compiler.source/target=8` 由父链下发）· Spring Boot 2.7.18 |
 | **配置前缀** | `z.mcp.*`（`McpProperties`）；总开关 `z.mcp.enabled` 默认 **false** |
-| **最近更新** | 2026-09-30 |
+| **最近更新** | 2026-10-20 |
 
 > 根 POM 里刻意只剩 `<revision>` 一格：Java 口径、UTF-8、`spring-boot.version=2.7.18`
 > 三格与父链面值逐字相同，已删，由 `z-boot-parent:1.1.0` 下发（第三方地板与兄弟仓权威表均已并入 parent 自身）。
@@ -394,9 +394,10 @@ curl -sS -X POST localhost:18095/mcp \
 mvn -B -ntp verify
 ```
 
-盘上现数（本仓口径 `git grep -c '^    @Test'`）：**404 条用例** —— core **302** / starter **69** /
-server **26** / admin **7**，共 31 个测试类。`z-mcp-api` 没有测试源码（纯 DTO），
-CI 的表里那一行如实标 `-`，那是说得出名字的空格，不是缺格。
+截至 2026-10-20 的快照（本仓口径 `git grep -c '^    @Test'`）：**440 条用例** —— core **334** / starter **73** /
+server **26** / admin **7**，共 35 个测试类。这几个数**随用例增删而变**，此处只作快照登记；
+README 自守卫**不钉它们**（钉了必漂），改钉各模块的测试类**存在**。
+`z-mcp-api` 没有测试源码（纯 DTO），CI 的表里那一行如实标 `-`，那是说得出名字的空格，不是缺格。
 
 门禁不在 `mvn` 那一步，而在 [`tools/ci-tally.py`](tools/ci-tally.py)：CI 用
 `mvn verify -Dmaven.test.failure.ignore=true` 把四格**全跑完**（Maven 默认 fail-fast，第一个模块一红
