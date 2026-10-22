@@ -146,6 +146,7 @@ kubectl -n z-mcp rollout status deploy/z-mcp-server
 |---|---|---|---|
 | readinessProbe | `httpGet /mcp/admin/servers`（控制面 server 列表） | `httpGet /mcp/admin/health`（readiness + liveness） | `/mcp/admin/health` 本域**实测 200**，是专门的健康端点；`/mcp/admin/servers` 语义是「列 server」，不是健康判定 |
 | labels | 资源上只有 `app.kubernetes.io/name` | 额外加 `app.kubernetes.io/part-of` | 仅加标签，不影响 selector 匹配；`apply` 是幂等合并 |
+| SA 令牌自动挂载 | `automountServiceAccountToken: false` | 不含该字段 | 该收敛由**独立清单**执行（卡 `TASK-20261021-021` 交付、用户亲自执行），刻意与各域部署清单分开，避免抢同一批字段。⚠ `apply` 本清单**不会回退**这项加固（字段既不在本清单、也不在 last-applied ⇒ 三向合并不构成删除动作，已用 `kubectl apply --dry-run=server` 逐域实测：该字段仍为 `false`） |
 
 ## 6. 待办（不在本任务范围内）
 
