@@ -1,0 +1,89 @@
+# ============================================================
+# z-mcp —— Deployment（工作负载）
+#
+# 【镜像 tag 为什么这样写】
+#   image: zopc/z-mcp:local
+#   —— 裸 tag，**不带 Nexus 仓库前缀**。铁律：本集群 imagePullPolicy=Never，
+#      镜像只存在于两个节点的 containerd，不在任何 registry。k3s 不会去拉，
+#      它按 `image:` 字段的**字面引用**去节点本地 content store 里找。
+#      如果喂进 containerd 的 tag 带前缀（例如 nexus.internal/zopc/z-mcp:local）
+#      而清单里写的是裸 tag（或反过来），本地查不到 ⇒ Pod 卡 ErrImageNeverPull。
+#      喂镜像的 tag 必须与这里的 `image:` 逐字一致，见 README §2。
+#   imagePullPolicy: Never —— 照抄线上。
+#
+# 【探针为什么选 /mcp/admin/health】
+#   本域线上 1 副本在跑，`/mcp/admin/health` **实测返回 200**
+#   （body 形如 {"status":"DEGRADED",...}）⇒ 本域真实可用的健康端点。
+#   线上基线里的 readinessProbe 打的是 `httpGet /mcp/admin/servers`
+#   （控制面 server 列表，本清单换成专门的健康端点）。
+#
+#   ⚠ 注意：DEGRADED 是**业务降级状态**（某个下游 server 没起来），但 HTTP 状态码是 200。
+#     k8s 的 httpGet 探针只看状态码（200~399 算成功）⇒ 探针会判定为「就绪」。
+#     这是有意的：DEGRADED 时把 Pod 摘出 Service 只会让「部分 server 不可用」
+#     变成「整个 z-mcp 不可用」，故障面更大。业务降级要看 /mcp/admin/health 的 body，
+#     不要指望探针替你报警。
+#
+# 【secret 从哪来】
+#   本域**无 secret**（基线导出里没有 secretKeyRef）。
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: z-mcp-server
+  namespace: z-mcp
+  labels:
+    app.kubernetes.io/name: z-mcp-server
+    app.kubernetes.io/part-of: z-opc-foundation
+spec:
+  replicas: 1
+  # 保留 10 个历史版本 ⇒ `kubectl rollout undo deploy/z-mcp-server -n z-mcp` 可用。
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: z-mcp-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: z-mcp-server
+    spec:
+      containers:
+        - name: z-mcp
+          image: zopc/z-mcp:local
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 18095
+              protocol: TCP
+          env:
+            # JVM 参数：与线上逐字一致。
+            - name: JAVA_OPTS
+              value: "-Xms256m -Xmx768m"
+            # 服务端口：与容器端口一致（18095）。
+            # z-mcp 的 application.yml 读 ${Z_MCP_PORT:18095} ⇒ 显式钉住，别依赖默认值。
+            - name: Z_MCP_PORT
+              value: "18095"
+          resources:
+            limits:
+              cpu: "2"
+              memory: 1536Mi
+            requests:
+              cpu: 200m
+              memory: 1Gi
+          # 探针打 /mcp/admin/health：本域实测 200（body 可能是 DEGRADED，见文件头注释）。
+          readinessProbe:
+            httpGet:
+              path: /mcp/admin/health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /mcp/admin/health
+              port: http
+              scheme: HTTP
+            # 启动比就绪慢：JVM 起 + 装载 MCP server，放宽到 120s 再开始判活。
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 6

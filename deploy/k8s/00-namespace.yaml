@@ -1,0 +1,13 @@
+# ============================================================
+# z-mcp —— Namespace
+# 线上实况：ns z-mcp 已在集群里存在（workload z-mcp-server 在其中）。
+# 本文件把 ns 声明固化回代码，让「从零复现」成为可能。
+# ⚠ apply 时 namespace 已存在不会报错（幂等），不会动里面的既有对象。
+# ============================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: z-mcp
+  labels:
+    app.kubernetes.io/part-of: z-opc-foundation
+    app.kubernetes.io/name: z-mcp
