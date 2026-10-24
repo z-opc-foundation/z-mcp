@@ -78,7 +78,7 @@
              project.build.sourceEncoding=UTF-8、spring-boot.version=2.7.18。前两格在 6 个 pom 里
              没有别的引用点；spring-boot.version 只剩 z-mcp-server 那一处插件引用，键删、引用留着
              由父链解析（central_pom_scan 的 E 类不给"插件无版本"过关）。 -->
-        <revision>0.2.2</revision>
+        <revision>0.2.3</revision>
 
         <!-- z-agent-center-core 只在 z-mcp-starter 的 test scope 出现 (反射绑定校验)。
              1.0.1 = 该仓自身换用 z-agent-kernel 的 OllamaProvider。 -->
