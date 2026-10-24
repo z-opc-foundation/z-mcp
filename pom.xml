@@ -298,13 +298,13 @@
                                  构件对外不可见, 而 Maven 一路报 BUILD SUCCESS。实测 deployment 6baf402c（0.2.0）就是
                                  这样停在 VALIDATED、错误 0 却永远不公开。与其余 25 仓一致。 -->
                             <autoPublish>true</autoPublish>
-                            <!-- 本插件不认 maven.deploy.skip，没排除的模块照样进 bundle
-                                 （实测结论见 z-schedule/pom.xml 同位置注释）⇒ 不可发布的模块点名列出。
-                              · z-mcp-admin：管理端可执行应用，只有主类 + 数据源配置，repackage 不带
-                                  classifier ⇒ 产物是执行 fat jar，不是别仓可引的库件。 -->
-                            <excludeArtifacts>
-                                <excludeArtifact>z-mcp-admin</excludeArtifact>
-                            </excludeArtifacts>
+                            <!-- 不再排除 z-mcp-admin：它 packaging 是普通 jar（AdminController +
+                                 provided servlet），不是执行 fat jar；而且 **z-mcp-starter 的发布 pom
+                                 声明了对 z-mcp-admin 的 compile 依赖** ⇒ 把 admin 挡在 bundle 外，
+                                 消费方解析 starter 时会卡在 z-mcp-admin 坐标不存在。
+                                 2026-10-24 实测：发 1.1.0 时按旧口径排除 admin，bundle 里只有
+                                 z-mcp/z-mcp-api/z-mcp-core/z-mcp-starter 四件，starter 的 pom 却指着
+                                 z-mcp-admin:1.1.0 ⇒ 补发 admin 才把这张依赖网闭上。 -->
                         </configuration>
                     </plugin>
                 </plugins>
