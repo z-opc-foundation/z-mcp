@@ -689,15 +689,25 @@ public class ReadmeClaimsTest {
             }
         }
 
-        // ---- 部署面：确无 Dockerfile / compose / deploy / k8s / Makefile ----
+        // ---- 部署面：Dockerfile / compose / Makefile 确无；deploy/k8s 清单自 2026-10-22 起在仓里 ----
+        // 2026-10-22：仓里新增了 deploy/k8s/（把线上实况固化成清单），旧尺子仍按「仓根没有 deploy/」
+        // 判红 —— 那是尺子过期，不是 README 说谎。改成两段判：
+        //   ① 仍必须不存在的三样（Dockerfile / docker-compose / Makefile）照旧判；
+        //   ② deploy/ 在仓里 ⇒ README 必须点名 deploy/k8s（不许闷声多出一份部署面）。
         String stack = section(readme, "技术栈");
-        for (String absent : Arrays.asList("Dockerfile", "docker-compose", "deploy/", "k8s/", "Makefile")) {
+        for (String absent : Arrays.asList("Dockerfile", "docker-compose", "Makefile")) {
             if (stack.contains("没有") && !stack.contains(absent)) {
                 problems.add("【部署面】README 技术栈节说「本仓没有」某物，但没点名 " + absent);
             }
             if (existsAtRoot(root, absent)) {
                 problems.add("【部署面】README 声称仓根没有 " + absent + "，但盘上存在");
             }
+        }
+        if (existsAtRoot(root, "deploy/") && !stack.contains("deploy/k8s")) {
+            problems.add("【部署面】仓里有 deploy/，README 技术栈节却没点名 deploy/k8s");
+        }
+        if (!existsAtRoot(root, "deploy/") && stack.contains("deploy/k8s")) {
+            problems.add("【部署面】README 说有 deploy/k8s，但盘上没有 deploy/");
         }
 
         // ---- 文档目录：链接必须落地 ----
@@ -881,6 +891,18 @@ public class ReadmeClaimsTest {
         assertFalse("合成变异没生效：README 里没找到 McpSchema", mutated.equals(readme));
         List<String> problems = verify(mutated, facts());
         assertFalse("README 能力清单的类名被改，尺子居然没报红", problems.isEmpty());
+    }
+
+    @Test
+    public void 尺子的牙口_部署面被改必红() {
+        String readme = readme();
+        // 仓里有 deploy/k8s/ 时，README 必须点名它；把点名抹掉，尺子必须报红
+        String mutated = readme.replace("`deploy/k8s/`", "`部署清单`");
+        assertFalse("合成变异没生效：README 里没找到 deploy/k8s", mutated.equals(readme));
+        List<String> problems = verify(mutated, facts());
+        assertFalse("README 抹掉 deploy/k8s 的点名，尺子居然没报红", problems.isEmpty());
+        assertTrue("报错没指出被改坏的部署面：\n" + String.join("\n", problems),
+                problems.toString().contains("deploy/k8s"));
     }
 
     @Test

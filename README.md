@@ -23,7 +23,7 @@
 |------|-----|
 | **仓库** | `z-mcp` |
 | **Maven 坐标** | `io.github.yuku123:z-mcp:${revision}`（`packaging=pom`，聚合五模块） |
-| **当前版本** | `0.2.1`（根 POM `<revision>`，CI-friendly versions + flatten-maven-plugin `1.7.2`，`flattenMode=oss`） |
+| **当前版本** | `0.2.2`（根 POM `<revision>`，CI-friendly versions + flatten-maven-plugin `1.7.2`，`flattenMode=oss`） |
 | **父项目** | `io.github.yuku123:z-boot-parent:1.1.0`（`<relativePath/>` 留空，parent 在 repo1 不在磁盘） |
 | **模块** | `z-mcp-api` / `z-mcp-core` / `z-mcp-starter` / `z-mcp-admin` / `z-mcp-server`（`<modules>` 实测顺序） |
 | **Maven Central** | 六枚坐标 `0.2.1` **均已发布**（见「发布与构件」的逐枚实测） |
@@ -249,8 +249,9 @@ z-mcp/
 `z-mcp-core` 的依赖面刻意收在 Spring Web + Jackson + SLF4J 三样上，这样它进任何宿主应用
 都不会带来第二套 JSON 库或响应式栈。
 
-本仓没有 `Dockerfile` / `docker-compose*.yml` / `deploy/` / `k8s/` / `Makefile`（实测目录树），
-交付物就是 fat jar；250 那台机器上的部署不在本仓的资产面里。
+本仓没有 `Dockerfile` / `docker-compose*.yml` / `Makefile`（实测目录树），交付物就是 fat jar。
+仓里有 `deploy/k8s/` —— 2026-10-22 把线上实况（`kubectl get deploy,svc -o yaml` 的真实导出）
+固化成清单，让集群能从代码复现；**清单只产出、不代跑**，`kubectl apply` 仍要人工确认后执行。
 
 ---
 

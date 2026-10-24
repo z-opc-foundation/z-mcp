@@ -1,6 +1,7 @@
 package com.zifang.z.mcp.starter.bridge;
 
 import com.zifang.util.core.meta.Result;
+import com.zifang.z.mcp.admin.service.AdminQueryService;
 import com.zifang.z.mcp.api.dto.CallToolResult;
 import com.zifang.z.mcp.api.dto.McpToolDto;
 import com.zifang.z.mcp.core.client.ExternalServerManager;
@@ -41,6 +42,8 @@ public class McpAliasController {
     private ObjectProvider<McpRegistry> mcpRegistryProvider;
     @Autowired
     private ObjectProvider<McpProperties> mcpPropertiesProvider;
+    @Autowired
+    private ObjectProvider<AdminQueryService> adminQueryServiceProvider;
 
     /**
      * MCP 上游列表 (alias，数据来自 z-mcp ExternalServerManager 的状态视图 + 本机注册表一行).
@@ -131,6 +134,40 @@ public class McpAliasController {
         } catch (Exception e) {
             return Result.success(CallToolResult.executionError(String.valueOf(e.getMessage())).toWire());
         }
+    }
+
+    /**
+     * 控制面只读投影 (2026-10-22 智能板块 MCP 页改造)：z-mcp-admin 的原生面挂
+     * {@code ${base-path}/mcp/admin/*}，不带 /api 前缀且只在 z.mcp.expose-admin=true
+     * 时装配；前端统一走 /api 前缀，这里把 overview / servers/state / health 三条
+     * 只读查询投影到 {@code /api/mcp/admin/*}。鉴权与其它 /api/mcp 别名同口径
+     * （归口平台 SSO），不复制 TransportSecurityGuard —— 那把闸守的是原生面。
+     */
+    @GetMapping("/api/mcp/admin/overview")
+    public Result<Map<String, Object>> mcpAdminOverviewAlias() {
+        AdminQueryService service = adminQueryServiceProvider.getIfAvailable();
+        if (service == null) {
+            return Result.fail("z.mcp.expose-admin 未开启，控制面未装配");
+        }
+        return Result.success(service.overview());
+    }
+
+    @GetMapping("/api/mcp/admin/servers/state")
+    public Result<List<Map<String, Object>>> mcpAdminServerStateAlias() {
+        AdminQueryService service = adminQueryServiceProvider.getIfAvailable();
+        if (service == null) {
+            return Result.fail("z.mcp.expose-admin 未开启，控制面未装配");
+        }
+        return Result.success(service.externalServers());
+    }
+
+    @GetMapping("/api/mcp/admin/health")
+    public Result<Map<String, Object>> mcpAdminHealthAlias() {
+        AdminQueryService service = adminQueryServiceProvider.getIfAvailable();
+        if (service == null) {
+            return Result.fail("z.mcp.expose-admin 未开启，控制面未装配");
+        }
+        return Result.success(service.health());
     }
 
     /** 某个 server 名下的工具；空名或本机名对应注册表自己的工具 (dto.serverName 为 null)。 */
