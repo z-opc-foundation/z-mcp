@@ -47,3 +47,9 @@ Thumbs.db
 /.cache/
 **/__pycache__/
 *.pyc
+
+# ============================
+# Frontend（suit/component 的依赖与产物不入库）
+# ============================
+**/node_modules/
+**/dist/
