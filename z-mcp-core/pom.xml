@@ -15,7 +15,7 @@
     <version>${revision}</version>
     <packaging>jar</packaging>
 
-    <name>z-mcp-core</name>
+    <name>z-mcp :: core</name>
     <description>MCP 注册中心 + McpServer (JSON-RPC over HTTP/SSE) + McpClient 默认实现</description>
 
     <dependencies>

@@ -15,7 +15,7 @@
     <version>${revision}</version>
     <packaging>jar</packaging>
 
-    <name>z-mcp-admin</name>
+    <name>z-mcp :: admin</name>
     <!-- 挂载前缀 z.mcp.base-path 是 Spring 的配置键（AdminController 的 @RequestMapping 把它与
          /mcp/admin 拼起来，默认空串），不是 Maven 属性：原先 <description> 里写成美元大括号形式 ⇒
          Maven 对模型做插值，而该键在仓内与父链都没有定义，发布出去的 pom 上就挂着一串悬空引用。

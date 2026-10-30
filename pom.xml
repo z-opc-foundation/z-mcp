@@ -32,8 +32,8 @@
     <version>${revision}</version>
     <packaging>pom</packaging>
 
-    <name>z-mcp (MCP Tool &amp; Service Registry)</name>
-    <description>MCP 协议网关与注册中心: 内置工具 + 上游 server 聚合(http/stdio) + 一致性门禁</description>
+    <name>z-mcp :: root</name>
+    <description>MCP 协议网关与注册中心: 内置工具 + 上游 server 聚合(http/stdio) + 一致性门禁 / MCP Tool &amp; Service Registry</description>
     <url>https://github.com/z-opc-foundation/z-mcp</url>
 
     <licenses>

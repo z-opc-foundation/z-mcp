@@ -15,7 +15,7 @@
     <version>${revision}</version>
     <packaging>jar</packaging>
 
-    <name>z-mcp-server</name>
+    <name>z-mcp :: server</name>
     <description>可部署的 MCP 进程: 一个 fat jar 按 profile 选角色(hub 聚合 / text / codec), 部署在内网 250 上</description>
 
     <!--

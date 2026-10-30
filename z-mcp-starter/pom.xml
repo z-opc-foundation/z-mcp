@@ -15,7 +15,7 @@
     <version>${revision}</version>
     <packaging>jar</packaging>
 
-    <name>z-mcp-starter</name>
+    <name>z-mcp :: starter</name>
     <description>Spring Boot 自动装配: ZMcpAutoConfiguration + spring.factories</description>
 
     <dependencies>

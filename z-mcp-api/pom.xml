@@ -15,6 +15,6 @@
     <version>${revision}</version>
     <packaging>jar</packaging>
 
-    <name>z-mcp-api (DTO)</name>
+    <name>z-mcp :: api</name>
     <description>MCP 协议 DTO + 异常, 零依赖 (供 z-mcp-core / z-bot / z-agent 共享)</description>
 </project>
