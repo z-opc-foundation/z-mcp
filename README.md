@@ -29,7 +29,7 @@
 | **Maven Central** | 六枚坐标 `0.2.1` **均已发布**（见「发布与构件」的逐枚实测） |
 | **协议口径** | 实现基线 `2025-06-18`，最高采纳 `2025-11-25`（`McpSchema.LATEST_SUPPORTED`） |
 | **默认端口** | `18095`（hub）/ `18096`（text）/ `18097`（codec），均可被 `Z_MCP_PORT` 覆盖；作为库引入时端口跟随宿主应用 |
-| **运行口径** | Java 8（`maven.compiler.source/target=8` 由父链下发）· Spring Boot 2.7.18 |
+| **运行口径** | Java 17（`maven.compiler.source/target=17` 由父链下发）· Spring Boot 3.3.13 |
 | **配置前缀** | `z.mcp.*`（`McpProperties`）；总开关 `z.mcp.enabled` 默认 **false** |
 | **最近更新** | 2026-10-20 |
 
@@ -234,7 +234,7 @@ z-mcp/
 
 | 层级 | 技术（均来自 pom 实测） |
 |------|--------------------------|
-| 语言 / 运行时 | Java 8（口径由 `z-boot-parent` 的 `pluginManagement` 下发，产出 class major 52） |
+| 语言 / 运行时 | Java 17（口径由 `z-boot-parent` 的 `pluginManagement` 下发，产出 class major 61） |
 | 框架 | Spring Boot 2.7.18（`z-boot-parent` 自带地板供给；根 POM 已删重复 import） |
 | HTTP 层 | `spring-web` + `spring-webmvc` + `javax.servlet-api`，SSE 用 `SseEmitter` |
 | 序列化 | `jackson-databind`（唯一 JSON 依赖） |
