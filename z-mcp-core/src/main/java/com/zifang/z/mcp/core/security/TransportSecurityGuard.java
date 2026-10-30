@@ -54,14 +54,14 @@ public class TransportSecurityGuard {
      * {@code /mcp/admin} 照样把上游 endpoint、{@code lastError}、完整 JSON Schema 白送给
      * 任何能连上端口的人。一把尺量两扇门，"配了锁"才等于"锁上了"。
      */
-    public Violation checkRequest(javax.servlet.http.HttpServletRequest request) {
+    public Violation checkRequest(jakarta.servlet.http.HttpServletRequest request) {
         return checkRequest(trim(request.getHeader("Origin")),
                 effectiveHost(request),
                 trim(request.getHeader("Authorization")));
     }
 
     /** Host 依据：只有显式声明"我在可信反代后面"才认 {@code X-Forwarded-Host}。 */
-    public String effectiveHost(javax.servlet.http.HttpServletRequest request) {
+    public String effectiveHost(jakarta.servlet.http.HttpServletRequest request) {
         if (properties.getSecurity().isTrustedProxy()) {
             String forwarded = trim(request.getHeader("X-Forwarded-Host"));
             if (forwarded != null) return forwarded;

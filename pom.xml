@@ -23,7 +23,7 @@
     <parent>
         <groupId>io.github.yuku123</groupId>
         <artifactId>z-boot-parent</artifactId>
-        <version>1.1.0</version>
+        <version>1.2.0</version>
         <relativePath/>
     </parent>
 
@@ -78,7 +78,7 @@
              project.build.sourceEncoding=UTF-8、spring-boot.version=2.7.18。前两格在 6 个 pom 里
              没有别的引用点；spring-boot.version 只剩 z-mcp-server 那一处插件引用，键删、引用留着
              由父链解析（central_pom_scan 的 E 类不给"插件无版本"过关）。 -->
-        <revision>0.2.3</revision>
+        <revision>1.1.1</revision>
 
         <!-- z-agent-center-core 只在 z-mcp-starter 的 test scope 出现 (反射绑定校验)。
              1.0.1 = 该仓自身换用 z-agent-kernel 的 OllamaProvider。 -->
@@ -277,6 +277,19 @@
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-gpg-plugin</artifactId>
                         <version>3.2.7</version>
+                        <configuration>
+                            <!-- 2026-10-30 对齐 z-util / z-boot 的实发口径：
+                                 ① keyname 显式钉真实 key id —— 插件默认 local-user=default，
+                                    而本机密钥环里没有名为 "default" 的密钥
+                                    ⇒ gpg 报 skipped "default": No secret key。
+                                 ② executable 指向仓内 wrapper —— wrapper 负责剔除调用方
+                                    传来的 pinentry-mode 参数（插件自己会传 error，
+                                    盖掉 wrapper 的 loopback ⇒ gpg 报 No pinentry），
+                                    再以 loopback + passphrase 交给系统 gpg。
+                                 ③ 口令走环境变量名（gpg.passphraseEnvName），绝不进 argv。 -->
+                            <keyname>A403FCCFD7EF5DA6</keyname>
+                            <executable>${maven.multiModuleProjectDirectory}/_doc/003_script/gpg-with-passphrase.sh</executable>
+                        </configuration>
                         <executions>
                             <execution>
                                 <id>sign-artifacts</id>

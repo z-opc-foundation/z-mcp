@@ -1,2 +1,0 @@
-org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
-com.zifang.z.mcp.starter.autoconfig.ZMcpAutoConfiguration

@@ -23,8 +23,8 @@
 |------|-----|
 | **仓库** | `z-mcp` |
 | **Maven 坐标** | `io.github.yuku123:z-mcp:${revision}`（`packaging=pom`，聚合五模块） |
-| **当前版本** | `0.2.2`（根 POM `<revision>`，CI-friendly versions + flatten-maven-plugin `1.7.2`，`flattenMode=oss`） |
-| **父项目** | `io.github.yuku123:z-boot-parent:1.1.0`（`<relativePath/>` 留空，parent 在 repo1 不在磁盘） |
+| **当前版本** | `1.1.1`（根 POM `<revision>`，CI-friendly versions + flatten-maven-plugin `1.7.2`，`flattenMode=oss`） |
+| **父项目** | `io.github.yuku123:z-boot-parent:1.2.0`（`<relativePath/>` 留空，parent 在 repo1 不在磁盘） |
 | **模块** | `z-mcp-api` / `z-mcp-core` / `z-mcp-starter` / `z-mcp-admin` / `z-mcp-server`（`<modules>` 实测顺序） |
 | **Maven Central** | 六枚坐标 `0.2.1` **均已发布**（见「发布与构件」的逐枚实测） |
 | **协议口径** | 实现基线 `2025-06-18`，最高采纳 `2025-11-25`（`McpSchema.LATEST_SUPPORTED`） |
@@ -34,7 +34,7 @@
 | **最近更新** | 2026-10-20 |
 
 > 根 POM 里刻意只剩 `<revision>` 一格：Java 口径、UTF-8、`spring-boot.version=2.7.18`
-> 三格与父链面值逐字相同，已删，由 `z-boot-parent:1.1.0` 下发（第三方地板与兄弟仓权威表均已并入 parent 自身）。
+> 三格与父链面值逐字相同，已删，由 `z-boot-parent:1.2.0` 下发（第三方地板与兄弟仓权威表均已并入 parent 自身）。
 
 ---
 
@@ -201,7 +201,7 @@ JSON-RPC 码），而 `RESOURCE_NOT_FOUND` 仍留 `-32002`（`2025-11-25/server/
 
 ```
 z-mcp/
-├── pom.xml                 # 聚合根 POM：parent z-boot-parent:1.1.0，<revision>0.2.1</revision>，五模块
+├── pom.xml                 # 聚合根 POM：parent z-boot-parent:1.2.0，<revision>0.2.1</revision>，五模块
 ├── z-mcp-api/              # 零依赖 DTO 与异常：JsonRpcRequest/Response、CallToolResult、
 │                           #   ContentBlock（text/image/audio/resource_link/resource 五支 + raw）、
 │                           #   McpToolDto/McpResourceDto/McpPromptDto/McpServerDto、ToolAnnotations、McpException

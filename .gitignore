@@ -53,3 +53,7 @@ Thumbs.db
 # ============================
 **/node_modules/
 **/dist/
+
+# Maven Central 发布凭证与 GPG 密钥环（绝不入库）
+.env
+.gnupg/
