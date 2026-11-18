@@ -16,7 +16,7 @@ Java 17 + Project Reactor，而本仓编译目标是 Java 8，也不想把 React
 且丢弃 stderr 等于丢掉唯一的诊断线索），SSE 用 Spring MVC 的 `SseEmitter`。
 
 **Maven 坐标：** `io.github.yuku123:z-mcp:${revision}`（当前 `0.2.1`，根 POM `packaging=pom`），
-父项目 `io.github.yuku123:z-boot-parent:1.1.0`（`<relativePath/>` 留空）。
+父项目 `io.github.yuku123:z-boot-parent:1.2.4`（`<relativePath/>` 留空）。
 
 **技术栈：** Java 8 + Spring Boot 2.7.18 + Maven 多模块（5 个 reactor 模块）；
 协议面为手写 JSON-RPC 2.0 over Streamable HTTP + SSE。
@@ -25,7 +25,7 @@ Java 17 + Project Reactor，而本仓编译目标是 Java 8，也不想把 React
 
 ```
 z-mcp/
-├── pom.xml                      # 聚合 POM：父 z-boot-parent:1.1.0，5 个 reactor 模块
+├── pom.xml                      # 聚合 POM：父 z-boot-parent:1.2.4，5 个 reactor 模块
 ├── z-mcp-api/                   # 契约层（10 文件 / 933 行）：JSON-RPC 与 MCP 的 DTO
 │                               #   api/dto（JsonRpcRequest / JsonRpcResponse / McpToolDto / McpResourceDto /
 │                               #    McpPromptDto / McpServerDto / CallToolResult / ContentBlock / ToolAnnotations）
