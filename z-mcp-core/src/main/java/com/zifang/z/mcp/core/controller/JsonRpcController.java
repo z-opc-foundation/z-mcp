@@ -1,13 +1,15 @@
 package com.zifang.z.mcp.core.controller;
 
-import com.zifang.z.mcp.core.json.Wire;
 import com.zifang.z.mcp.api.exception.McpException;
+import com.zifang.z.mcp.core.json.Wire;
 import com.zifang.z.mcp.core.properties.McpProperties;
 import com.zifang.z.mcp.core.protocol.McpProtocolHandler;
 import com.zifang.z.mcp.core.protocol.McpSchema;
 import com.zifang.z.mcp.core.registry.McpRegistry;
 import com.zifang.z.mcp.core.security.TransportSecurityGuard;
 import com.zifang.z.mcp.core.session.McpSessionStore;
+import com.zifang.z.meta.api.annotation.BizApi;
+import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
@@ -21,7 +23,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import jakarta.servlet.http.HttpServletRequest;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -70,6 +71,7 @@ public class JsonRpcController {
     // ------------------------------------------------------------------ POST
 
     @PostMapping("/mcp")
+    @BizApi(summary = "post", description = "", tags = { "z-mcp" })
     public ResponseEntity<String> post(HttpServletRequest request) {
         String accept = request.getHeader(HttpHeaders.ACCEPT);
         String protocolHeader = request.getHeader(McpSchema.H_PROTOCOL_VERSION);
@@ -240,6 +242,7 @@ public class JsonRpcController {
      * 而静默少发是查不出来的那种错。
      */
     @GetMapping("/mcp")
+    @BizApi(summary = "服务端主动流. 客户端可用它接收 notifications/*", description = "服务端主动流. 客户端可用它接收 notifications/*. 带 Last-Event-ID 时按协议续传: 会话缓冲里还留着的补发, 已经被淘汰的明确回 400 (而不是假装能续、给一条少了几条事件的流)。协议只说客户端 SHOULD 用 GET + Last-Event-ID 重来, 没有规定补不上时怎么办; 这里选 400, 因为它能让客户端立刻退回\"不续传\"的用法, 而静默少发是查不出来的那种错。", tags = { "z-mcp" })
     public ResponseEntity<SseEmitter> stream(HttpServletRequest request) {
         TransportSecurityGuard.Violation v = guard.checkRequest(request);
         if (v != null) {
@@ -347,6 +350,7 @@ public class JsonRpcController {
     // ---------------------------------------------------------------- DELETE
 
     @DeleteMapping("/mcp")
+    @BizApi(summary = "terminate", description = "", tags = { "z-mcp" })
     public ResponseEntity<String> terminate(HttpServletRequest request) {
         TransportSecurityGuard.Violation v = guard.checkRequest(request);
         if (v != null) return denied(v).build();
@@ -377,6 +381,7 @@ public class JsonRpcController {
      * {@link TransportSecurityGuard}: 一把闸要么三面都关得一样, 要么等于没关.
      */
     @GetMapping("/mcp/info")
+    @BizApi(summary = "GET /mcp/info 的只读自检(不经 JSON-RPC): 便于探针/负载均衡器识别端点存活", description = "GET /mcp/info 的只读自检(不经 JSON-RPC): 便于探针/负载均衡器识别端点存活. 它报的是工具/资源/会话计数与服务端版本 —— 拓扑指纹. 0.2.0 收口控制面时闸只装在 z-mcp-admin 那组映射上, 这条同前缀的路径连请求对象都不接, 于是配了 security.bearer-tokens 之后它仍对任意来源匿名开放. 现在与另外两扇门共用 TransportSecurityGuard: 一把闸要么三面都关得一样, 要么等于没关.", tags = { "z-mcp" })
     public ResponseEntity<?> info(HttpServletRequest request) {
         TransportSecurityGuard.Violation v = guard.checkRequest(request);
         if (v != null) return denied(v).build();
@@ -536,3 +541,6 @@ public class JsonRpcController {
         BodyTooLarge(String m) { super(m); }
     }
 }
+
+
+

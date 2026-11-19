@@ -8,6 +8,9 @@ import com.zifang.z.mcp.core.client.ExternalServerManager;
 import com.zifang.z.mcp.core.json.Wire;
 import com.zifang.z.mcp.core.properties.McpProperties;
 import com.zifang.z.mcp.core.registry.McpRegistry;
+import com.zifang.z.meta.api.annotation.BizApi;
+import com.zifang.z.meta.api.annotation.BizField;
+import com.zifang.z.meta.api.annotation.BizParam;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -50,6 +53,7 @@ public class McpAliasController {
      * <p>{@code GET /api/mcp/server/list}</p>
      */
     @GetMapping("/api/mcp/server/list")
+    @BizApi(summary = "MCP 上游列表 (alias，数据来自 z-mcp ExternalServerManager 的状态视图 + 本机注册表一行)", description = "MCP 上游列表 (alias，数据来自 z-mcp ExternalServerManager 的状态视图 + 本机注册表一行). GET /api/mcp/server/list", tags = { "z-mcp" })
     public Result<List<Map<String, Object>>> mcpServerListAlias() {
         McpRegistry registry = mcpRegistryProvider.getIfAvailable();
         List<Map<String, Object>> rows = new ArrayList<>();
@@ -84,7 +88,8 @@ public class McpAliasController {
      * <p>{@code POST /api/mcp/server/tools/list}，body {@code {serverName}}；缺省看本机那一行。</p>
      */
     @PostMapping("/api/mcp/server/tools/list")
-    public Result<Map<String, Object>> mcpToolListAlias(@RequestBody(required = false) Map<String, Object> body) {
+    @BizApi(summary = "MCP 工具列表 (alias，数据来自 McpRegistry 的目录)", description = "MCP 工具列表 (alias，数据来自 McpRegistry 的目录). POST /api/mcp/server/tools/list，body {serverName}；缺省看本机那一行。", tags = { "z-mcp" })
+    public Result<Map<String, Object>> mcpToolListAlias(@RequestBody(required = false) @BizParam(name = "body", type = BizField.FieldType.JSON, description = "", position = BizParam.Position.BODY) Map<String, Object> body) {
         List<Map<String, Object>> tools = new ArrayList<>();
         McpRegistry registry = mcpRegistryProvider.getIfAvailable();
         if (registry != null) {
@@ -109,7 +114,8 @@ public class McpAliasController {
      * 所以前端始终拿到同一形状的 {@code {content: [{type, text}]}}。</p>
      */
     @PostMapping("/api/mcp/server/tools/call")
-    public Result<Map<String, Object>> mcpToolCallAlias(@RequestBody(required = false) Map<String, Object> body) {
+    @BizApi(summary = "MCP 工具调用 (alias，走 McpRegistry.call，结果按协议线格式交回)", description = "MCP 工具调用 (alias，走 McpRegistry.call，结果按协议线格式交回). POST /api/mcp/server/tools/call，body {toolName, arguments}。 工具自身失败按协议走 isError=true + content 说明，不是 HTTP 错误， 所以前端始终拿到同一形状的 {content: [{type, text]}}。", tags = { "z-mcp" })
+    public Result<Map<String, Object>> mcpToolCallAlias(@RequestBody(required = false) @BizParam(name = "body", type = BizField.FieldType.JSON, description = "", position = BizParam.Position.BODY) Map<String, Object> body) {
         McpRegistry registry = mcpRegistryProvider.getIfAvailable();
         if (registry == null) {
             return Result.success(CallToolResult.executionError("MCP 注册表不可用 (z.mcp.enabled=false)").toWire());
@@ -144,6 +150,7 @@ public class McpAliasController {
      * （归口平台 SSO），不复制 TransportSecurityGuard —— 那把闸守的是原生面。
      */
     @GetMapping("/api/mcp/admin/overview")
+    @BizApi(summary = "控制面只读投影 (2026-10-22 智能板块 MCP 页改造)：z-mcp-admin 的原生面挂", description = "控制面只读投影 (2026-10-22 智能板块 MCP 页改造)：z-mcp-admin 的原生面挂 ${base-path/mcp/admin/*}，不带 /api 前缀且只在 z.mcp.expose-admin=true 时装配；前端统一走 /api 前缀，这里把 overview / servers/state / health 三条 只读查询投影到 /api/mcp/admin/*。鉴权与其它 /api/mcp 别名同口径 （归口平台 SSO），不复制 TransportSecurityGuard —— 那把闸守的是原生面。", tags = { "z-mcp" })
     public Result<Map<String, Object>> mcpAdminOverviewAlias() {
         AdminQueryService service = adminQueryServiceProvider.getIfAvailable();
         if (service == null) {
@@ -153,6 +160,7 @@ public class McpAliasController {
     }
 
     @GetMapping("/api/mcp/admin/servers/state")
+    @BizApi(summary = "mcpAdminServerStateAlias", description = "", tags = { "z-mcp" })
     public Result<List<Map<String, Object>>> mcpAdminServerStateAlias() {
         AdminQueryService service = adminQueryServiceProvider.getIfAvailable();
         if (service == null) {
@@ -162,6 +170,7 @@ public class McpAliasController {
     }
 
     @GetMapping("/api/mcp/admin/health")
+    @BizApi(summary = "mcpAdminHealthAlias", description = "", tags = { "z-mcp" })
     public Result<Map<String, Object>> mcpAdminHealthAlias() {
         AdminQueryService service = adminQueryServiceProvider.getIfAvailable();
         if (service == null) {
@@ -208,3 +217,6 @@ public class McpAliasController {
         return Wire.write(value);
     }
 }
+
+
+

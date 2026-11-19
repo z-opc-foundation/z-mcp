@@ -2,13 +2,14 @@ package com.zifang.z.mcp.admin.controller;
 
 import com.zifang.z.mcp.admin.service.AdminQueryService;
 import com.zifang.z.mcp.core.security.TransportSecurityGuard;
+import com.zifang.z.meta.api.annotation.BizApi;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import jakarta.servlet.http.HttpServletRequest;
 import java.util.List;
 import java.util.Map;
 
@@ -39,12 +40,14 @@ public class AdminController {
     }
 
     @GetMapping("/overview")
+    @BizApi(summary = "overview", description = "", tags = { "z-mcp" })
     public ResponseEntity<?> overview(HttpServletRequest request) {
         ResponseEntity<?> denied = refuseIfViolating(request);
         return denied != null ? denied : ResponseEntity.ok(service.overview());
     }
 
     @GetMapping("/tools")
+    @BizApi(summary = "tools", description = "", tags = { "z-mcp" })
     public ResponseEntity<?> tools(HttpServletRequest request) {
         ResponseEntity<?> denied = refuseIfViolating(request);
         return denied != null ? denied : ResponseEntity.ok(service.listTools().stream().map(t -> {
@@ -58,6 +61,7 @@ public class AdminController {
     }
 
     @GetMapping("/servers")
+    @BizApi(summary = "servers", description = "", tags = { "z-mcp" })
     public ResponseEntity<?> servers(HttpServletRequest request) {
         ResponseEntity<?> denied = refuseIfViolating(request);
         return denied != null ? denied : ResponseEntity.ok(service.listServers().stream().map(s -> {
@@ -75,12 +79,14 @@ public class AdminController {
      * /servers 是"目录里现在广告了什么", 这里是"上游现在到底连没连上、为什么".
      */
     @GetMapping("/servers/state")
+    @BizApi(summary = "外部 server 的真实运行状态 —— 与 /servers 的区别是这份带连通性", description = "外部 server 的真实运行状态 —— 与 /servers 的区别是这份带连通性: /servers 是\"目录里现在广告了什么\", 这里是\"上游现在到底连没连上、为什么\".", tags = { "z-mcp" })
     public ResponseEntity<?> serverState(HttpServletRequest request) {
         ResponseEntity<?> denied = refuseIfViolating(request);
         return denied != null ? denied : ResponseEntity.ok(service.externalServers());
     }
 
     @GetMapping("/health")
+    @BizApi(summary = "health", description = "", tags = { "z-mcp" })
     public ResponseEntity<?> health(HttpServletRequest request) {
         ResponseEntity<?> denied = refuseIfViolating(request);
         return denied != null ? denied : ResponseEntity.ok(service.health());
@@ -95,3 +101,6 @@ public class AdminController {
         return builder.build();
     }
 }
+
+
+

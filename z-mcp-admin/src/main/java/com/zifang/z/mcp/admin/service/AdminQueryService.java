@@ -6,6 +6,7 @@ import com.zifang.z.mcp.core.client.ExternalServerManager;
 import com.zifang.z.mcp.core.properties.McpProperties;
 import com.zifang.z.mcp.core.protocol.McpSchema;
 import com.zifang.z.mcp.core.registry.McpRegistry;
+import com.zifang.z.meta.api.annotation.BizMethod;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
@@ -37,6 +38,7 @@ public class AdminQueryService {
         this.servers = servers;
     }
 
+    @BizMethod(name = "overview", module = "z-mcp", description = "", operation = BizMethod.Operation.ACTION)
     public Map<String, Object> overview() {
         Map<String, Object> data = new LinkedHashMap<String, Object>();
         List<McpToolDto> builtin = registry.listBuiltinTools();
@@ -60,15 +62,18 @@ public class AdminQueryService {
         return p;
     }
 
+    @BizMethod(name = "listTools", module = "z-mcp", description = "", operation = BizMethod.Operation.QUERY)
     public List<McpToolDto> listTools() {
         return registry.listTools();
     }
 
+    @BizMethod(name = "listServers", module = "z-mcp", description = "", operation = BizMethod.Operation.QUERY)
     public List<McpServerDto> listServers() {
         return registry.listServers();
     }
 
     /** 逐个外部 server 的真实状态: 连没连上、协议版本、当前广告了几个工具、上次为什么失败. */
+    @BizMethod(name = "逐个外部 server 的真实状态: 连没连上、协议版本、当前广告了几个工具、上次为什么失败", module = "z-mcp", description = "逐个外部 server 的真实状态: 连没连上、协议版本、当前广告了几个工具、上次为什么失败.", operation = BizMethod.Operation.ACTION)
     public List<Map<String, Object>> externalServers() {
         ExternalServerManager manager = servers.getIfAvailable();
         return manager == null ? Collections.<Map<String, Object>>emptyList() : manager.state();
@@ -83,6 +88,7 @@ public class AdminQueryService {
      * 注册中心自己活着就是 UP; 外部 server 掉了算 DEGRADED 并在同一份响应里点名,
      * 不会假装一切正常, 也不会因为别人的故障把自己报成 DOWN.
      */
+    @BizMethod(name = "注册中心自己活着就是 UP; 外部 server 掉了算 DEGRADED 并在同一份响应里点名", module = "z-mcp", description = "注册中心自己活着就是 UP; 外部 server 掉了算 DEGRADED 并在同一份响应里点名, 不会假装一切正常, 也不会因为别人的故障把自己报成 DOWN.", operation = BizMethod.Operation.ACTION)
     public Map<String, Object> health() {
         Map<String, Object> data = new LinkedHashMap<String, Object>();
         List<Map<String, Object>> detail = externalServers();
@@ -98,3 +104,6 @@ public class AdminQueryService {
         return data;
     }
 }
+
+
+

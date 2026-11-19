@@ -73,6 +73,7 @@
     </modules>
 
     <properties>
+        <z-meta.version>1.0.2</z-meta.version>
         <!-- 版本口径全部由 parent 链下发，这里只留版本的单一真源。删掉的三格与父链面值逐字相同
              （z-boot-parent/pom.xml:56-58、66）：maven.compiler.source/target=8、
              project.build.sourceEncoding=UTF-8、spring-boot.version=2.7.18。前两格在 6 个 pom 里
@@ -144,6 +145,11 @@
             <!-- spring-boot-dependencies 的 import 删掉：地板已经 import 同一格
                  spring-boot-dependencies:2.7.18（z-boot-dependencies/pom.xml:42、224-228），
                  与本仓面值相同 ⇒ 重复 import 只是 dm 打架的来源。 -->
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-meta-api</artifactId>
+                <version>${z-meta.version}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
     <dependencies>
