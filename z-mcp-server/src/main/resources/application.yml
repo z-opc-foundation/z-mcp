@@ -16,6 +16,11 @@ spring:
     banner-mode: off
 
 z:
+  # z-ext 预置埋点自登记控制台（运行期可被控制台切换扩展点实现）
+  ext:
+    console:
+      enabled: true
+      url: ${ZEXT_CONSOLE_URL:http://192.168.31.136:8888}
   mcp:
     enabled: true
     # 控制面 /mcp/admin/* 与数据面共用同一道 TransportSecurityGuard(0.2.0 收口时补的),
