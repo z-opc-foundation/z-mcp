@@ -42,6 +42,7 @@ function ProtectedShell() {
         <AppLayout
             menuItems={menuItems}
             appTitle="mcp 服务台"
+            appShort="z-mcp"
             appVersion={appVersion}
             appUser={user}
             appIcon={{ icon: <img src="/icon.png" alt="mcp 服务台" style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 8 }}/>, color: '#0f766e', label: 'mcp 服务台' }}
